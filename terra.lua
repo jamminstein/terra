@@ -324,7 +324,7 @@ end
 -- 4=GLITCH: chaotic jumps into the extremes of each voice's synthesis capabilities
 -- 5=BREATHE: organic golden-ratio waves, each voice a different organism
 
-local TIMBRE_STYLES = {"off", "SWEEP", "PUNCH", "MORPH", "GLITCH", "BREATHE"}
+local TIMBRE_STYLES = {"off", "SWEEP", "PUNCH", "MORPH", "GLITCH", "BREATHE", "MUTATE"}
 local timbre = {
   style = 0,
   intensity = 0.5,
@@ -574,6 +574,200 @@ local function timbre_engineer_step(step_num)
   end
 end
 
+-- ============ MUTATE: per-hit voice mutation ============
+-- Called at the moment of each trigger. Every hit sounds different.
+-- Uses a "wander + return" system: each voice slowly drifts away from
+-- its base config, explores, then periodically snaps back closer to home
+-- before wandering out in a new direction.
+
+local mutate = {
+  -- per-voice wander state: how far we've drifted from base (0-1)
+  wander = {0, 0, 0, 0, 0, 0},
+  -- per-voice direction: which way we're heading (1=explore, -1=return)
+  direction = {1, 1, 1, 1, 1, 1},
+  -- per-voice hit counter: track how many hits since last direction change
+  hits = {0, 0, 0, 0, 0, 0},
+  -- per-voice "home" snapshot: where we return to
+  home = {},
+}
+
+-- snapshot current voice state as "home"
+local function mutate_snapshot_home(t)
+  local v = voices[t]
+  mutate.home[t] = {
+    filter_freq = params:get("v" .. t .. "_filter"),
+    filter_res = params:get("v" .. t .. "_res"),
+    decay = params:get("v" .. t .. "_decay"),
+    pitch_env = params:get("v" .. t .. "_penv"),
+    pitch_decay = v.pitch_decay,
+    pan = params:get("v" .. t .. "_pan"),
+    spread = params:get("v" .. t .. "_spread"),
+    amp = params:get("v" .. t .. "_amp"),
+    fm_index = v.fm_index, fm_ratio = v.fm_ratio,
+    shape = v.shape, noise_amt = v.noise_amt, filter_env_amt = v.filter_env_amt,
+    noise_type = v.noise_type, grain_rate = v.grain_rate, ring_amt = v.ring_amt,
+  }
+end
+
+-- mutate a voice at the moment of triggering (called from trigger_voice)
+local function mutate_on_hit(t)
+  if timbre.style ~= 6 then return end  -- 6 = MUTATE style
+
+  local v = voices[t]
+  local int = timbre.intensity
+  local w = mutate.wander[t]
+
+  -- initialize home if needed
+  if not mutate.home[t] then mutate_snapshot_home(t) end
+  local home = mutate.home[t]
+
+  mutate.hits[t] = mutate.hits[t] + 1
+
+  -- direction logic: explore for 8-24 hits, then return for 4-12 hits
+  if mutate.direction[t] == 1 then
+    -- exploring: wander increases
+    mutate.wander[t] = math.min(1, w + randf(0.02, 0.08) * int)
+    -- after enough hits, start returning
+    if mutate.hits[t] > math.random(8, 24) then
+      mutate.direction[t] = -1
+      mutate.hits[t] = 0
+    end
+  else
+    -- returning: wander decreases
+    mutate.wander[t] = math.max(0, w - randf(0.04, 0.12))
+    -- after returning close to home, re-snapshot and explore again
+    if mutate.wander[t] < 0.05 or mutate.hits[t] > math.random(4, 12) then
+      mutate.direction[t] = 1
+      mutate.hits[t] = 0
+      mutate_snapshot_home(t)  -- new home = wherever we are now
+    end
+  end
+
+  w = mutate.wander[t]
+
+  -- the mutation amount scales with wander distance AND intensity
+  -- near home (w~0): subtle variations. far out (w~1): wild changes
+  local amount = w * int
+
+  -- chance-based: not every param changes every hit
+  -- more params change as we wander further out
+  local change_chance = 0.3 + amount * 0.5  -- 30% near home, 80% far out
+
+  -- filter freq: the most audible parameter
+  if math.random() < change_chance then
+    local target = home.filter_freq * (2 ^ (randf(-1, 1) * 2 * amount))
+    v.filter_freq = util.clamp(
+      v.filter_freq * (1 - amount * 0.5) + target * amount * 0.5,
+      60, 16000)
+  end
+
+  -- filter resonance
+  if math.random() < change_chance * 0.7 then
+    v.filter_res = util.clamp(
+      home.filter_res + randf(-0.4, 0.4) * amount,
+      0.05, 0.95)
+  end
+
+  -- decay: shorter or longer hits
+  if math.random() < change_chance * 0.8 then
+    v.decay = util.clamp(
+      home.decay * (1 + randf(-0.6, 0.8) * amount),
+      0.02, 1.5)
+  end
+
+  -- pitch envelope: subtle to extreme pitch swoops
+  if math.random() < change_chance * 0.6 then
+    v.pitch_env = math.max(0,
+      home.pitch_env + randf(-4, 8) * amount)
+  end
+
+  -- pitch decay
+  if math.random() < change_chance * 0.4 then
+    v.pitch_decay = util.clamp(
+      home.pitch_decay * (1 + randf(-0.5, 1.0) * amount),
+      0.003, 0.3)
+  end
+
+  -- pan: spatial movement
+  if math.random() < change_chance * 0.5 then
+    v.pan = util.clamp(
+      home.pan + randf(-0.8, 0.8) * amount,
+      -1, 1)
+  end
+
+  -- spread: stereo width
+  if math.random() < change_chance * 0.3 then
+    v.spread = util.clamp(randf(0, 1) * amount, 0, 1)
+  end
+
+  -- detune
+  if math.random() < change_chance * 0.3 then
+    v.detune = randf(-8, 8) * amount
+  end
+
+  -- filter type: rare shift (more likely when far out)
+  if math.random() < 0.05 * amount then
+    v.filter_type = math.random(0, 2)
+  end
+
+  -- amp: subtle dynamics variation
+  if math.random() < change_chance * 0.4 then
+    v.amp = util.clamp(
+      home.amp * (1 + randf(-0.2, 0.15) * amount),
+      0.1, 1.0)
+  end
+
+  -- deep mode-specific mutation (the soul of each voice)
+  if math.random() < change_chance then
+    if v.mode == 0 then
+      -- FM: index controls harmonic density, ratio controls character
+      if math.random() < 0.6 then
+        v.fm_index = util.clamp(
+          home.fm_index + randf(-2, 3) * amount, 0, 8)
+      end
+      if math.random() < 0.4 then
+        -- bias toward harmonic ratios occasionally
+        if math.random() < 0.3 then
+          -- snap to musical ratio
+          local ratios = {0.5, 1, 1.414, 1.5, 2, 2.5, 3, 3.5, 4, 5}
+          v.fm_ratio = ratios[math.random(#ratios)]
+        else
+          v.fm_ratio = util.clamp(
+            home.fm_ratio + randf(-1.5, 2) * amount, 0.25, 7)
+        end
+      end
+    elseif v.mode == 1 then
+      -- Sub: waveform shape is the character knob
+      if math.random() < 0.5 then
+        v.shape = util.clamp(
+          home.shape + randf(-0.3, 0.3) * amount, 0, 1)
+      end
+      if math.random() < 0.4 then
+        v.noise_amt = util.clamp(
+          home.noise_amt + randf(-0.3, 0.4) * amount, 0, 1)
+      end
+      if math.random() < 0.3 then
+        v.filter_env_amt = util.clamp(
+          home.filter_env_amt + randf(-2000, 3000) * amount, 0, 8000)
+      end
+    elseif v.mode == 2 then
+      -- Noise: texture type and density are the character
+      if math.random() < 0.5 then
+        v.noise_type = util.clamp(
+          home.noise_type + randf(-0.3, 0.3) * amount, 0, 1)
+      end
+      if math.random() < 0.5 then
+        v.grain_rate = util.clamp(
+          home.grain_rate * (1 + randf(-0.5, 0.8) * amount), 5, 200)
+      end
+      if math.random() < 0.3 then
+        v.ring_amt = util.clamp(
+          home.ring_amt + randf(-0.2, 0.3) * amount, 0, 1)
+      end
+    end
+  end
+end
+
 -- ============ FX SYSTEM (Esu's Trifecta-inspired) ============
 
 local fx = {}
@@ -639,6 +833,9 @@ local function trigger_voice(track, velocity)
       freq = snap_to_scale(v.base_freq)
     end
   end
+  -- per-hit mutation (MUTATE style)
+  mutate_on_hit(track)
+
   local hz = musicutil.note_num_to_freq(freq)
   local amp = v.amp * velocity
 
