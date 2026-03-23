@@ -299,7 +299,7 @@ end
 
 local TIMBRE_STYLES = {"off", "SWEEP", "PUNCH", "MORPH", "GLITCH", "BREATHE"}
 local timbre = {
-  style = 1,         -- global style (0=off, 1-5)
+  style = 0,         -- global style (0=off, 1-5)
   intensity = 0.5,   -- 0-1 how much to modulate
   phase = {},        -- per-voice phase accumulator
   target = {},       -- per-voice target values for MORPH
@@ -547,7 +547,8 @@ local function advance_step()
 
   drift_step()
   react_adjust()
-  timbre_engineer_step(step)
+  local tok, terr = pcall(timbre_engineer_step, step)
+  if not tok then print("terra timbre error: " .. tostring(terr)) end
   redraw()
   grid_redraw()
 end
@@ -557,13 +558,17 @@ local function start_sequence()
   step = 0
   clock_id = clock.run(function()
     while true do
-      -- swing: even steps get delayed
+      clock.sync(1/4)
+      -- swing: delay even steps slightly
       if swing_amt > 0 and step % 2 == 0 then
-        clock.sync(1/4 + (swing_amt / 100) * (1/8))
-      else
-        clock.sync(1/4)
+        clock.sleep((swing_amt / 100) * (60 / clock.get_tempo() / 4))
       end
-      if playing then advance_step() end
+      if playing then
+        local ok, err = pcall(advance_step)
+        if not ok then
+          print("terra clock error: " .. tostring(err))
+        end
+      end
     end
   end)
 end
