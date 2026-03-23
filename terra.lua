@@ -782,9 +782,11 @@ local function draw_main()
   screen.text(playing and string.char(9654) or "STOP") -- play triangle
 
   local status = ""
-  if drift_mode then status = status .. " DRFT" end
-  if react_mode then status = status .. " RCT" end
-  if swing_amt > 0 then status = status .. " SW" end
+  if drift_mode then status = status .. " D" end
+  if react_mode then status = status .. "R" end
+  if timbre.style > 0 then
+    status = status .. " " .. string.sub(TIMBRE_STYLES[timbre.style + 1], 1, 3)
+  end
   if #status > 0 then
     screen.level(6)
     screen.move(74, 7)
@@ -918,39 +920,48 @@ local function draw_fx()
   screen.move(0, 7)
   screen.text("FX CHAIN")
 
+  -- timbre engineer status in header
+  if timbre.style > 0 then
+    screen.level(10)
+    screen.move(62, 7)
+    screen.text(TIMBRE_STYLES[timbre.style + 1])
+  end
+
   for i = 1, NUM_FX_SLOTS do
-    local y = 10 + (i - 1) * 18
+    local y = 8 + (i - 1) * 16
+
     screen.level(i == selected_fx_slot and 15 or 6)
     screen.move(0, y + 8)
     screen.text(i .. ":" .. FX_NAMES[fx[i].type + 1])
 
     if fx[i].type > 0 then
       local pnames = FX_PARAMS[fx[i].type + 1]
-      -- param 1 bar
       screen.level(4)
       screen.move(58, y + 4)
       screen.text(pnames[1])
       screen.level(i == selected_fx_slot and 12 or 6)
-      screen.rect(58, y + 6, fx[i].param1 * 52, 3)
+      local w1 = math.max(1, fx[i].param1 * 52)
+      screen.rect(58, y + 6, w1, 3)
       screen.fill()
-      -- param 2 bar
+
       screen.level(4)
-      screen.move(58, y + 12)
+      screen.move(58, y + 11)
       screen.text(pnames[2])
       screen.level(i == selected_fx_slot and 10 or 5)
-      screen.rect(58, y + 14, fx[i].param2 * 52, 3)
+      local w2 = math.max(1, fx[i].param2 * 52)
+      screen.rect(58, y + 13, w2, 3)
       screen.fill()
     end
   end
 
-  -- duck
+  -- duck + timbre intensity
   screen.level(duck_amt > 0 and 12 or 3)
   screen.move(0, 63)
   screen.text("DUCK " .. string.format("%.0f%%", duck_amt * 100))
-  if duck_amt > 0 then
-    screen.rect(50, 58, duck_amt * 60, 4)
-    screen.fill()
-  end
+
+  screen.level(timbre.style > 0 and 8 or 3)
+  screen.move(70, 63)
+  screen.text("INT " .. string.format("%.0f%%", timbre.intensity * 100))
 end
 
 local function draw_harmony()
@@ -1032,9 +1043,39 @@ end
 
 -- ============ CONTROLS ============
 
+-- E1: always page
+-- page 1 (MAIN):   E2=select track, E3=euclid pulses (or velocity if grid held)
+-- page 2 (PATTERN):E2=select track, E3=euclid offset
+-- page 3 (FX):     E2=select FX slot, E3=FX type
+-- page 4 (HARMONY):E2=root note, E3=scale
+--
+-- K2: play/stop (always)
+-- K3 page-dependent:
+--   page 1: generate pattern for selected track
+--   page 2: toggle mute for selected track
+--   page 3: cycle timbre engineer style
+--   page 4: cycle chord mode (off → major → minor → dim → off)
+-- K2 hold + K3: toggle drift+react
+-- K2 hold + E2: filter freq for selected track (performance macro)
+-- K2 hold + E3: decay for selected track (performance macro)
+
 function enc(n, d)
   if n == 1 then
     page = util.clamp(page + d, 1, 4)
+
+  elseif k2_held then
+    -- K2 held: performance macros
+    local t = selected_track
+    if n == 2 then
+      -- filter freq sweep
+      voices[t].filter_freq = util.clamp(voices[t].filter_freq * (1 + d * 0.05), 60, 16000)
+      params:set("v" .. t .. "_filter", voices[t].filter_freq, true)
+    elseif n == 3 then
+      -- decay sweep
+      voices[t].decay = util.clamp(voices[t].decay + d * 0.02, 0.01, 2.0)
+      params:set("v" .. t .. "_decay", voices[t].decay, true)
+    end
+
   elseif page == 1 then
     if n == 2 then
       selected_track = util.clamp(selected_track + d, 1, NUM_VOICES)
@@ -1051,8 +1092,10 @@ function enc(n, d)
       else
         seq[selected_track].euclid_k = util.clamp(seq[selected_track].euclid_k + d, 0, NUM_STEPS)
         apply_euclidean(selected_track)
+        params:set("v" .. selected_track .. "_euclid", seq[selected_track].euclid_k, true)
       end
     end
+
   elseif page == 2 then
     if n == 2 then
       selected_track = util.clamp(selected_track + d, 1, NUM_VOICES)
@@ -1060,6 +1103,7 @@ function enc(n, d)
       seq[selected_track].euclid_offset = (seq[selected_track].euclid_offset + d) % NUM_STEPS
       apply_euclidean(selected_track)
     end
+
   elseif page == 3 then
     if n == 2 then
       selected_fx_slot = util.clamp(selected_fx_slot + d, 1, NUM_FX_SLOTS)
@@ -1067,7 +1111,9 @@ function enc(n, d)
       local slot = selected_fx_slot
       fx[slot].type = util.clamp(fx[slot].type + d, 0, #FX_NAMES - 1)
       set_fx_type(slot, fx[slot].type)
+      params:set("fx" .. slot .. "_type", fx[slot].type + 1, true)
     end
+
   elseif page == 4 then
     if n == 2 then
       harmony.root = (harmony.root + d) % 12
@@ -1084,30 +1130,38 @@ function key(n, z)
   if n == 2 then
     k2_held = z == 1
     if z == 1 then
+      -- play/stop on all pages
       if playing then stop_sequence() else start_sequence() end
     end
-  elseif n == 3 and z == 1 then
-    if k2_held then
-      drift_mode = not drift_mode
-      react_mode = drift_mode
-    else
-      if page == 1 or page == 2 then
+  elseif n == 3 then
+    if z == 1 then
+      if k2_held then
+        -- K2+K3: toggle drift + react
+        drift_mode = not drift_mode
+        react_mode = drift_mode
+      elseif page == 1 then
+        -- generate new pattern for selected track
         generate_pattern(selected_track)
+      elseif page == 2 then
+        -- toggle mute for selected track
+        mutes[selected_track] = not mutes[selected_track]
+        params:set("v" .. selected_track .. "_mute", mutes[selected_track] and 2 or 1, true)
       elseif page == 3 then
-        -- cycle fx params with K3
-        local slot = selected_fx_slot
-        if fx[slot].type > 0 then
-          fx[slot].param1 = (fx[slot].param1 + 0.15) % 1.01
-          update_fx_params(slot)
-        end
+        -- cycle timbre engineer style
+        timbre.style = (timbre.style + 1) % (#TIMBRE_STYLES)
+        params:set("timbre_style", timbre.style + 1, true)
       elseif page == 4 then
-        if harmony.chord_mode then
-          harmony.chord_type = (harmony.chord_type % 3) + 1
-          params:set("chord_type", harmony.chord_type, true)
-        else
+        -- cycle: off → major → minor → dim → off
+        if not harmony.chord_mode then
           harmony.chord_mode = true
-          params:set("chord_mode", 2, true)
+          harmony.chord_type = 1
+        elseif harmony.chord_type < 3 then
+          harmony.chord_type = harmony.chord_type + 1
+        else
+          harmony.chord_mode = false
         end
+        params:set("chord_mode", harmony.chord_mode and 2 or 1, true)
+        params:set("chord_type", harmony.chord_type, true)
       end
     end
   end
