@@ -327,7 +327,7 @@ end
 -- 5=BREATHE: organic golden-ratio waves, each voice a different organism
 
 local TIMBRE_STYLES = {"off", "SWEEP", "PUNCH", "MORPH", "GLITCH", "BREATHE",
-  "MUTATE", "SCATTER", "RATCHET", "DIALECT"}
+  "MUTATE", "SCATTER", "RATCHET", "DIALECT", "SWAP"}
 local timbre = {
   style = 0,
   intensity = 0.5,
@@ -573,6 +573,38 @@ local function timbre_engineer_step(step_num)
       if math.random() < 0.008 * int then
         v.filter_type = math.random(0, 2)
       end
+
+    elseif timbre.style == 10 then
+      -- SWAP: periodically swap voice synthesis modes mid-sequence
+      -- each voice independently swaps on its own cycle
+      timbre.phase[t] = phase + 0.005 + (t * 0.002)
+      if math.random() < 0.015 * int then
+        -- swap to a different mode
+        local new_mode = math.random(0, 2)
+        if new_mode ~= v.mode then
+          v.mode = new_mode
+          -- set sensible defaults for the new mode
+          if new_mode == 0 then
+            v.fm_index = randf(0.3, 3)
+            v.fm_ratio = ({0.5, 1, 1.414, 1.5, 2, 3})[math.random(1, 6)]
+          elseif new_mode == 1 then
+            v.shape = randf(0, 1)
+            v.noise_amt = randf(0, 0.5)
+            v.filter_env_amt = randf(500, 4000)
+          elseif new_mode == 2 then
+            v.noise_type = randf(0, 1)
+            v.grain_rate = randf(15, 100)
+            v.ring_amt = randf(0, 0.4)
+          end
+        end
+      end
+      -- also do gentle BREATHE-style modulation between swaps
+      local p = timbre.phase[t]
+      local w1 = math.sin(p + t * 0.618)
+      v.filter_freq = util.clamp(
+        params:get("v" .. t .. "_filter") * (1 + w1 * 0.4 * int), 60, 16000)
+      v.decay = util.clamp(
+        params:get("v" .. t .. "_decay") * (1 + math.sin(p * 0.7) * 0.3 * int), 0.02, 1.5)
     end
   end
 end
@@ -864,6 +896,383 @@ local function mutate_on_hit(t)
   end
 end
 
+-- ============ PATTERN ENGINEER ============
+-- Evolves step patterns musically. Unlike drift (which just flips random steps),
+-- the pattern engineer has musical strategies for how patterns grow and change.
+--
+-- Styles:
+-- 1=BUILDER: gradually adds steps, building density toward peaks then stripping back
+-- 2=SHIFTER: rotates and mirrors patterns, creating call+response
+-- 3=POLYRHYTHM: morphs euclidean densities creating interlocking rhythms
+-- 4=BREAKBEAT: chops patterns into fragments, rearranges, creates fills
+-- 5=CONDUCTOR: coordinates all tracks — builds sections (sparse/dense/fill/drop)
+
+local PAT_STYLES = {"off", "BUILDER", "SHIFTER", "POLY", "BREAK", "CONDUCTOR"}
+local pat_eng = {
+  style = 0,
+  intensity = 0.5,
+  phase = 0,
+  section = 1,       -- for CONDUCTOR: 1=sparse, 2=build, 3=peak, 4=drop
+  section_len = 0,   -- steps remaining in current section
+  bar_count = 0,     -- for tracking musical phrases
+}
+
+local function pattern_engineer_step(step_num)
+  if pat_eng.style == 0 then return end
+  local int = pat_eng.intensity
+
+  -- only act on bar boundaries (every 16 steps) to keep things musical
+  if step_num % 16 ~= 0 then
+    -- BREAKBEAT acts more frequently
+    if pat_eng.style ~= 4 then return end
+    if step_num % 4 ~= 0 then return end
+  end
+
+  pat_eng.bar_count = pat_eng.bar_count + 1
+
+  if pat_eng.style == 1 then
+    -- BUILDER: density wave — add steps, peak, remove, repeat
+    pat_eng.phase = pat_eng.phase + 0.08 * int
+    local density_target = (math.sin(pat_eng.phase) * 0.5 + 0.5) * int
+
+    for t = 1, NUM_VOICES do
+      local active = 0
+      for s = 1, NUM_STEPS do active = active + seq[t].pattern[s] end
+      local current_density = active / NUM_STEPS
+      local diff = density_target - current_density
+
+      if diff > 0.05 then
+        -- add 1-2 steps
+        local adds = math.random(1, 2)
+        for _ = 1, adds do
+          local s = math.random(1, NUM_STEPS)
+          if seq[t].pattern[s] == 0 then
+            seq[t].pattern[s] = 1
+            seq[t].vel[s] = randf(0.4, 0.9)
+            seq[t].prob[s] = math.random(60, 100)
+          end
+        end
+      elseif diff < -0.05 then
+        -- remove 1-2 steps
+        local removes = math.random(1, 2)
+        for _ = 1, removes do
+          local s = math.random(1, NUM_STEPS)
+          seq[t].pattern[s] = 0
+        end
+      end
+    end
+
+  elseif pat_eng.style == 2 then
+    -- SHIFTER: rotate, mirror, and echo patterns between tracks
+    local action = math.random(1, 4)
+    local t = math.random(1, NUM_VOICES)
+
+    if action == 1 and math.random() < 0.4 * int then
+      -- rotate pattern by 1-4 steps
+      local shift = math.random(1, 4)
+      local rotated = {}
+      for s = 1, NUM_STEPS do
+        rotated[s] = seq[t].pattern[((s - 1 + shift) % NUM_STEPS) + 1]
+      end
+      seq[t].pattern = rotated
+    elseif action == 2 and math.random() < 0.3 * int then
+      -- mirror pattern (reverse)
+      local mirrored = {}
+      for s = 1, NUM_STEPS do mirrored[s] = seq[t].pattern[NUM_STEPS - s + 1] end
+      seq[t].pattern = mirrored
+    elseif action == 3 and math.random() < 0.25 * int then
+      -- echo: copy one track's pattern to another (offset)
+      local src = math.random(1, NUM_VOICES)
+      local offset = math.random(1, 4)
+      for s = 1, NUM_STEPS do
+        local src_s = ((s - 1 + offset) % NUM_STEPS) + 1
+        if math.random() < 0.5 then
+          seq[t].pattern[s] = seq[src].pattern[src_s]
+        end
+      end
+    elseif action == 4 and math.random() < 0.2 * int then
+      -- invert: flip all steps
+      for s = 1, NUM_STEPS do
+        seq[t].pattern[s] = 1 - seq[t].pattern[s]
+      end
+    end
+
+  elseif pat_eng.style == 3 then
+    -- POLYRHYTHM: morph euclidean densities for interlocking patterns
+    for t = 1, NUM_VOICES do
+      if math.random() < 0.3 * int then
+        -- pick a musically interesting euclidean density
+        local interesting = {2, 3, 4, 5, 7, 9, 11, 13}
+        local k = interesting[math.random(1, #interesting)]
+        k = math.min(k, math.floor(NUM_STEPS * (0.3 + int * 0.5)))
+        seq[t].euclid_k = k
+        seq[t].euclid_offset = math.random(0, NUM_STEPS - 1)
+        apply_euclidean(t)
+      end
+    end
+
+  elseif pat_eng.style == 4 then
+    -- BREAKBEAT: chop and rearrange every 4 steps
+    if math.random() < 0.3 * int then
+      local t = math.random(1, NUM_VOICES)
+      local action = math.random(1, 4)
+
+      if action == 1 then
+        -- stutter: repeat a 4-step segment
+        local seg_start = (math.random(0, 3) * 4) + 1
+        local target_start = (math.random(0, 3) * 4) + 1
+        if seg_start ~= target_start then
+          for s = 0, 3 do
+            seq[t].pattern[target_start + s] = seq[t].pattern[seg_start + s]
+            seq[t].vel[target_start + s] = seq[t].vel[seg_start + s]
+          end
+        end
+      elseif action == 2 then
+        -- fill: burst of hits in a 4-step window
+        local start = (math.random(0, 3) * 4) + 1
+        for s = start, math.min(start + 3, NUM_STEPS) do
+          seq[t].pattern[s] = 1
+          seq[t].vel[s] = randf(0.5, 1.0)
+        end
+      elseif action == 3 then
+        -- drop: clear a 4-step window
+        local start = (math.random(0, 3) * 4) + 1
+        for s = start, math.min(start + 3, NUM_STEPS) do
+          seq[t].pattern[s] = 0
+        end
+      elseif action == 4 then
+        -- swap two 4-step segments
+        local a = math.random(0, 3) * 4
+        local b = math.random(0, 3) * 4
+        if a ~= b then
+          for s = 1, 4 do
+            local tmp = seq[t].pattern[a + s]
+            seq[t].pattern[a + s] = seq[t].pattern[b + s]
+            seq[t].pattern[b + s] = tmp
+          end
+        end
+      end
+    end
+
+  elseif pat_eng.style == 5 then
+    -- CONDUCTOR: coordinates ALL tracks through musical sections
+    pat_eng.section_len = pat_eng.section_len - 1
+    if pat_eng.section_len <= 0 then
+      -- advance to next section
+      pat_eng.section = (pat_eng.section % 4) + 1
+      pat_eng.section_len = math.random(2, 6)  -- 2-6 bars per section
+    end
+
+    local sec = pat_eng.section
+    if sec == 1 then
+      -- SPARSE: strip back, minimal
+      for t = 1, NUM_VOICES do
+        if math.random() < 0.3 * int then
+          -- remove random steps
+          local s = math.random(1, NUM_STEPS)
+          seq[t].pattern[s] = 0
+        end
+        seq[t].track_prob = util.clamp(seq[t].track_prob - math.random(0, 5) * int, 40, 100)
+      end
+    elseif sec == 2 then
+      -- BUILD: gradually add density
+      for t = 1, NUM_VOICES do
+        if math.random() < 0.25 * int then
+          local s = math.random(1, NUM_STEPS)
+          seq[t].pattern[s] = 1
+          seq[t].vel[s] = randf(0.5, 0.8)
+        end
+        seq[t].track_prob = util.clamp(seq[t].track_prob + math.random(2, 8) * int, 40, 100)
+      end
+    elseif sec == 3 then
+      -- PEAK: maximum density, fills, all tracks firing
+      for t = 1, NUM_VOICES do
+        if math.random() < 0.2 * int then
+          local s = math.random(1, NUM_STEPS)
+          seq[t].pattern[s] = 1
+          seq[t].vel[s] = randf(0.7, 1.0)
+        end
+        seq[t].track_prob = 100
+      end
+    elseif sec == 4 then
+      -- DROP: mute some tracks, create tension
+      for t = 1, NUM_VOICES do
+        if t ~= 1 and math.random() < 0.4 * int then
+          -- temporarily thin out (not kick)
+          seq[t].track_prob = util.clamp(seq[t].track_prob - math.random(10, 30) * int, 20, 100)
+        end
+      end
+    end
+  end
+end
+
+-- ============ FILTER ENGINEER ============
+-- Plays with filters and mutes rhythmically.
+-- Creates filter sweeps, rhythmic muting, filter-type cycling,
+-- and resonance surges — all synced to the beat.
+--
+-- Styles:
+-- 1=SWEEP: coordinated filter sweeps across voices (DJ-style)
+-- 2=STROBE: rhythmic muting/unmuting creating gating effects
+-- 3=RESONATE: resonance surges and filter-type switching
+-- 4=ISOLATE: solo voices in rotation, spotlight each one
+
+local FILT_STYLES = {"off", "SWEEP", "STROBE", "RESONATE", "ISOLATE"}
+local filt_eng = {
+  style = 0,
+  intensity = 0.5,
+  phase = 0,
+  solo_voice = 0,     -- for ISOLATE
+  solo_timer = 0,
+  saved_mutes = nil,   -- backup mutes for restore
+}
+
+local function filter_engineer_step(step_num)
+  if filt_eng.style == 0 then return end
+  local int = filt_eng.intensity
+
+  if filt_eng.style == 1 then
+    -- SWEEP: coordinated filter sweeps — all voices move together
+    -- like a DJ pulling the filter down then opening it back up
+    filt_eng.phase = filt_eng.phase + 0.015 + int * 0.01
+    local sweep = math.sin(filt_eng.phase)
+
+    for t = 1, NUM_VOICES do
+      local base = params:get("v" .. t .. "_filter")
+      -- all voices sweep together but at slightly different rates
+      local voice_sweep = math.sin(filt_eng.phase + t * 0.2)
+      voices[t].filter_freq = util.clamp(
+        base * (2 ^ (voice_sweep * 2 * int)), 60, 16000)
+    end
+
+    -- occasional coordinated resonance surge
+    if math.random() < 0.03 * int then
+      for t = 1, NUM_VOICES do
+        voices[t].filter_res = util.clamp(
+          params:get("v" .. t .. "_res") + randf(0.2, 0.5) * int, 0.05, 0.95)
+      end
+    end
+
+  elseif filt_eng.style == 2 then
+    -- STROBE: rhythmic muting creates gating effects
+    local beat = step_num % 4
+    local bar_pos = step_num % 16
+
+    -- different strobe patterns per voice
+    local patterns = {
+      {1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1},  -- kick: always on
+      {1,1,1,1, 1,1,1,1, 1,0,1,0, 1,0,1,0},  -- snare: strobe last 8
+      {1,0,1,0, 1,0,1,0, 1,1,1,1, 1,1,1,1},  -- hat: strobe first 8
+      {1,1,0,0, 1,1,0,0, 1,1,0,0, 1,1,0,0},  -- perc: pairs
+      {1,0,0,1, 0,0,1,0, 0,1,0,0, 1,0,0,1},  -- tone: scattered
+      {0,0,1,1, 0,0,1,1, 1,1,0,0, 1,1,0,0},  -- fx: alternating pairs
+    }
+
+    -- apply strobe pattern with intensity blending
+    if math.random() < int then
+      for t = 1, NUM_VOICES do
+        local pat = patterns[t]
+        local gate = pat[bar_pos + 1] or 1
+        if gate == 0 then
+          mutes[t] = true
+        else
+          mutes[t] = false
+        end
+      end
+    end
+
+    -- every 4 bars, shuffle the strobe patterns
+    if bar_pos == 0 and math.random() < 0.3 * int then
+      -- rotate a random pattern
+      local t = math.random(2, NUM_VOICES)
+      local shift = math.random(1, 4)
+      local rotated = {}
+      for s = 1, 16 do
+        rotated[s] = patterns[t][((s - 1 + shift) % 16) + 1]
+      end
+      patterns[t] = rotated
+    end
+
+  elseif filt_eng.style == 3 then
+    -- RESONATE: resonance surges and filter-type cycling
+    filt_eng.phase = filt_eng.phase + 0.02
+
+    for t = 1, NUM_VOICES do
+      -- resonance surges on different cycles per voice
+      local res_wave = math.sin(filt_eng.phase * (1 + t * 0.3))
+      if res_wave > 0.3 then
+        -- surge: push resonance up
+        voices[t].filter_res = util.clamp(
+          params:get("v" .. t .. "_res") + res_wave * 0.5 * int, 0.05, 0.95)
+      else
+        -- rest: return to base
+        voices[t].filter_res = params:get("v" .. t .. "_res")
+      end
+
+      -- filter type cycling at different rates per voice
+      if math.random() < 0.02 * int * (1 + t * 0.2) then
+        voices[t].filter_type = math.random(0, 2)
+      end
+    end
+
+    -- coordinated filter freq movement (slower than SWEEP)
+    local global_wave = math.sin(filt_eng.phase * 0.3)
+    for t = 1, NUM_VOICES do
+      voices[t].filter_freq = util.clamp(
+        params:get("v" .. t .. "_filter") * (1 + global_wave * 0.5 * int),
+        60, 16000)
+    end
+
+  elseif filt_eng.style == 4 then
+    -- ISOLATE: solo voices in rotation, spotlight each one
+    filt_eng.solo_timer = filt_eng.solo_timer - 1
+
+    if filt_eng.solo_timer <= 0 then
+      -- save current mutes and switch spotlight
+      if not filt_eng.saved_mutes then
+        filt_eng.saved_mutes = {table.unpack(mutes)}
+      end
+
+      -- unmute all first
+      for t = 1, NUM_VOICES do mutes[t] = false end
+
+      if math.random() < 0.6 * int then
+        -- solo: mute everything except 1-2 voices
+        local solo1 = math.random(1, NUM_VOICES)
+        local solo2 = math.random(1, NUM_VOICES)
+        for t = 1, NUM_VOICES do
+          mutes[t] = (t ~= solo1 and t ~= solo2)
+        end
+        filt_eng.solo_voice = solo1
+      else
+        -- full: let everything play
+        filt_eng.solo_voice = 0
+      end
+
+      -- hold for 8-32 steps
+      filt_eng.solo_timer = math.random(8, 32)
+
+      -- push the soloed voice's filter to an interesting place
+      if filt_eng.solo_voice > 0 then
+        local sv = filt_eng.solo_voice
+        voices[sv].filter_freq = util.clamp(
+          params:get("v" .. sv .. "_filter") * randf(0.5, 2.0), 60, 16000)
+        voices[sv].filter_res = util.clamp(
+          params:get("v" .. sv .. "_res") + randf(0, 0.3) * int, 0.05, 0.95)
+      end
+    end
+  end
+end
+
+-- restore mutes when filter engineer is turned off
+local function filter_engineer_cleanup()
+  if filt_eng.saved_mutes then
+    for t = 1, NUM_VOICES do mutes[t] = filt_eng.saved_mutes[t] end
+    filt_eng.saved_mutes = nil
+  end
+  filt_eng.solo_voice = 0
+end
+
 -- ============ FX SYSTEM (Esu's Trifecta-inspired) ============
 
 local fx = {}
@@ -1106,6 +1515,10 @@ local function advance_step()
   react_adjust()
   local tok, terr = pcall(timbre_engineer_step, step)
   if not tok then print("terra timbre error: " .. tostring(terr)) end
+  local pok, perr = pcall(pattern_engineer_step, step)
+  if not pok then print("terra pattern error: " .. tostring(perr)) end
+  local fok, ferr = pcall(filter_engineer_step, step)
+  if not fok then print("terra filter error: " .. tostring(ferr)) end
 
   -- send voice state to OP-XY every 4 steps (don't flood MIDI)
   if opxy_out and step % 4 == 1 then
@@ -1235,6 +1648,27 @@ local function build_params()
     controlspec.new(0, 1, 'lin', 0.01, 0.5))
   params:set_action("timbre_intensity", function(v) timbre.intensity = v end)
 
+  -- pattern engineer
+  params:add_separator("PATTERN ENGINEER")
+  params:add_option("pat_style", "style", PAT_STYLES, 1)
+  params:set_action("pat_style", function(v) pat_eng.style = v - 1 end)
+
+  params:add_control("pat_intensity", "intensity",
+    controlspec.new(0, 1, 'lin', 0.01, 0.5))
+  params:set_action("pat_intensity", function(v) pat_eng.intensity = v end)
+
+  -- filter engineer
+  params:add_separator("FILTER ENGINEER")
+  params:add_option("filt_style", "style", FILT_STYLES, 1)
+  params:set_action("filt_style", function(v)
+    if v == 1 and filt_eng.style > 0 then filter_engineer_cleanup() end
+    filt_eng.style = v - 1
+  end)
+
+  params:add_control("filt_intensity", "intensity",
+    controlspec.new(0, 1, 'lin', 0.01, 0.5))
+  params:set_action("filt_intensity", function(v) filt_eng.intensity = v end)
+
   params:add_separator("FX CHAIN")
   for i = 1, NUM_FX_SLOTS do
     params:add_option("fx" .. i .. "_type", "fx " .. i .. " type", FX_NAMES, 1)
@@ -1337,16 +1771,19 @@ local function draw_main()
     screen.text(playing and ">" or "STOP")
   end
 
-  local status = ""
-  if drift_mode then status = status .. " D" end
-  if react_mode then status = status .. "R" end
-  if timbre.style > 0 then
-    status = status .. " " .. string.sub(TIMBRE_STYLES[timbre.style + 1], 1, 3)
+  -- active engineers indicator
+  local eng_x = 74
+  if drift_mode then
+    screen.level(5); screen.move(eng_x, 7); screen.text("D"); eng_x = eng_x + 7
   end
-  if #status > 0 then
-    screen.level(6)
-    screen.move(74, 7)
-    screen.text(status)
+  if timbre.style > 0 then
+    screen.level(6); screen.move(eng_x, 7); screen.text("T"); eng_x = eng_x + 7
+  end
+  if pat_eng.style > 0 then
+    screen.level(6); screen.move(eng_x, 7); screen.text("P"); eng_x = eng_x + 7
+  end
+  if filt_eng.style > 0 then
+    screen.level(6); screen.move(eng_x, 7); screen.text("F"); eng_x = eng_x + 7
   end
 
   -- voice lanes
@@ -1510,14 +1947,32 @@ local function draw_fx()
     end
   end
 
-  -- duck + timbre intensity
-  screen.level(duck_amt > 0 and 12 or 3)
-  screen.move(0, 63)
-  screen.text("DUCK " .. string.format("%.0f%%", duck_amt * 100))
-
-  screen.level(timbre.style > 0 and 8 or 3)
-  screen.move(70, 63)
-  screen.text("INT " .. string.format("%.0f%%", timbre.intensity * 100))
+  -- engineer status bar at bottom
+  local ey = 58
+  -- timbre
+  if timbre.style > 0 then
+    screen.level(10)
+    screen.move(0, ey)
+    screen.text("T:" .. string.sub(TIMBRE_STYLES[timbre.style + 1], 1, 3))
+  end
+  -- pattern
+  if pat_eng.style > 0 then
+    screen.level(10)
+    screen.move(30, ey)
+    screen.text("P:" .. string.sub(PAT_STYLES[pat_eng.style + 1], 1, 3))
+  end
+  -- filter
+  if filt_eng.style > 0 then
+    screen.level(10)
+    screen.move(60, ey)
+    screen.text("F:" .. string.sub(FILT_STYLES[filt_eng.style + 1], 1, 3))
+  end
+  -- duck
+  if duck_amt > 0 then
+    screen.level(8)
+    screen.move(90, ey)
+    screen.text("D:" .. string.format("%.0f", duck_amt * 100))
+  end
 end
 
 local function draw_harmony()
