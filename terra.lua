@@ -331,6 +331,7 @@ local TIMBRE_STYLES = {"off", "SWEEP", "PUNCH", "MORPH", "GLITCH", "BREATHE",
 local timbre = {
   style = 0,
   intensity = 0.5,
+  drum_brain = true,
   phase = {},
   target = {},
 }
@@ -538,9 +539,8 @@ end
 -- only fires on SCATTER and DIALECT styles — the "curated" ones.
 -- MUTATE, RATCHET, GLITCH, SWAP let kick/snare roam freely via mutate_on_hit.
 local function drum_brain_hit(track)
-  if track > 2 then return end  -- only kick and snare
-  -- drum brain only on SCATTER(7) and DIALECT(9) — styles that benefit from curated sounds
-  -- other per-hit styles (MUTATE, RATCHET, GLITCH, SWAP) let mutate_on_hit handle drums freely
+  if not timbre.drum_brain then return end
+  if track > 2 then return end
   if timbre.style ~= 7 and timbre.style ~= 9 then return end
 
   local int = timbre.intensity
@@ -2411,6 +2411,8 @@ local function build_params()
   params:add_control("timbre_intensity", "intensity",
     controlspec.new(0, 1, 'lin', 0.01, 0.5))
   params:set_action("timbre_intensity", function(v) timbre.intensity = v end)
+  params:add_option("drum_brain", "drum brain", {"off", "on"}, 2)
+  params:set_action("drum_brain", function(v) timbre.drum_brain = v == 2 end)
 
   -- === PATTERN ENGINEER ===
   params:add_separator("PATTERN ENGINEER")
