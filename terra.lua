@@ -1,4 +1,4 @@
--- terraform
+-- terra
 --
 -- percussion synthesizer +
 -- generative sequencer
@@ -15,7 +15,7 @@
 --
 -- v1.0 @jamminstein
 
-engine.name = "Terraform"
+engine.name = "Terra"
 
 local musicutil = require "musicutil"
 
@@ -464,7 +464,7 @@ end
 -- ============ PARAMS ============
 
 local function build_params()
-  params:add_separator("TERRAFORM")
+  params:add_separator("TERRA")
   params:add_separator("TRANSPORT")
 
   params:add_option("playing", "playing", {"off", "on"}, 1)
@@ -595,7 +595,7 @@ local function draw_main()
   -- header
   screen.level(15)
   screen.move(0, 7)
-  screen.text("TERRAFORM")
+  screen.text("TERRA")
   screen.level(4)
   screen.move(64, 7)
   screen.text(playing and "PLAY" or "STOP")

@@ -1,4 +1,4 @@
-// Engine_Terraform
+// Engine_Terra
 // Percussion synthesizer combining:
 //   UDO DMNO:     hybrid oscillators, binaural stereo, multi-mode VCF
 //   Space Drum:   (sequencer in Lua)
@@ -8,7 +8,7 @@
 // 6 percussion voices, each selectable between 3 synthesis modes
 // Signal: voice -> fxBus -> fx1 -> fx2 -> fx3 -> duck -> out
 
-Engine_Terraform : CroneEngine {
+Engine_Terra : CroneEngine {
 
     var pg;
     var fxGroup;
