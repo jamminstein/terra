@@ -59,6 +59,9 @@ for i = 1, NUM_VOICES do flash[i] = 0 end
 
 -- pattern clipboard
 local clipboard = nil  -- {pattern, prob, vel}
+local gen_flash = 0    -- countdown for "GEN" indicator
+local screen_dirty = true
+local grid_dirty = true
 
 -- midi
 local midi_out = nil
@@ -715,8 +718,8 @@ local function advance_step()
     end
   end
 
-  redraw()
-  grid_redraw()
+  screen_dirty = true
+  grid_dirty = true
 end
 
 local function stop_sequence()
@@ -926,7 +929,13 @@ local function draw_main()
   screen.text("TERRA")
   screen.level(playing and 15 or 4)
   screen.move(40, 7)
-  screen.text(playing and string.char(9654) or "STOP") -- play triangle
+  if gen_flash > 0 then
+    screen.level(15)
+    screen.text("GEN " .. VOICE_SHORT[selected_track])
+    gen_flash = gen_flash - 1
+  else
+    screen.text(playing and ">" or "STOP")
+  end
 
   local status = ""
   if drift_mode then status = status .. " D" end
@@ -1270,7 +1279,7 @@ function enc(n, d)
       params:set("scale", harmony.scale_type, true)
     end
   end
-  redraw()
+  screen_dirty = true; grid_dirty = true
 end
 
 function key(n, z)
@@ -1289,6 +1298,7 @@ function key(n, z)
       elseif page == 1 then
         -- generate new pattern for selected track
         generate_pattern(selected_track)
+        gen_flash = 8
       elseif page == 2 then
         -- toggle mute for selected track
         mutes[selected_track] = not mutes[selected_track]
@@ -1312,7 +1322,7 @@ function key(n, z)
       end
     end
   end
-  redraw()
+  screen_dirty = true; grid_dirty = true
 end
 
 -- ============ GRID ============
@@ -1500,8 +1510,8 @@ g.key = function(x, y, z)
     end
   end
 
-  redraw()
-  grid_redraw()
+  screen_dirty = true
+  grid_dirty = true
 end
 
 -- ============ INIT ============
@@ -1520,21 +1530,28 @@ function init()
   midi_in_device = midi.connect(params:get("midi_in_device"))
   midi_in_device.event = midi_event
 
-  -- screen refresh
+  -- screen refresh (dirty-flag driven)
   local screen_metro = metro.init()
   screen_metro.event = function()
-    -- decay flash counters
     for t = 1, NUM_VOICES do
-      if flash[t] > 0 then flash[t] = flash[t] - 1 end
+      if flash[t] > 0 then flash[t] = flash[t] - 1; screen_dirty = true end
     end
-    redraw()
+    if screen_dirty then
+      screen_dirty = false
+      screen_dirty = true; grid_dirty = true
+    end
   end
   screen_metro.time = 1/15
   screen_metro:start()
 
-  -- grid refresh metro (keeps grid alive during holds etc)
+  -- grid refresh (dirty-flag driven)
   local grid_metro = metro.init()
-  grid_metro.event = function() grid_redraw() end
+  grid_metro.event = function()
+    if grid_dirty then
+      grid_dirty = false
+      grid_redraw()
+    end
+  end
   grid_metro.time = 1/10
   grid_metro:start()
 
@@ -1549,7 +1566,7 @@ function init()
   seq[6].euclid_k = 2; apply_euclidean(6)
 
   params:bang()
-  redraw()
+  screen_dirty = true; grid_dirty = true
 end
 
 function cleanup()
