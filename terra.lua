@@ -2141,6 +2141,7 @@ end
 
 local function stop_sequence()
   playing = false
+  params:set("playing", 1, true)
   if clock_id then
     clock.cancel(clock_id)
     clock_id = nil
@@ -2148,9 +2149,9 @@ local function stop_sequence()
 end
 
 local function start_sequence()
-  -- prevent duplicate clocks
   if clock_id then stop_sequence() end
   playing = true
+  params:set("playing", 2, true)
   step = 0
   clock_id = clock.run(function()
     while true do
