@@ -1641,7 +1641,7 @@ function init()
     end
     if screen_dirty then
       screen_dirty = false
-      screen_dirty = true; grid_dirty = true
+      redraw()
     end
   end
   screen_metro.time = 1/15
