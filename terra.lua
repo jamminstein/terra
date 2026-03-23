@@ -1256,6 +1256,240 @@ local function filter_engineer_cleanup()
   filt_eng.solo_voice = 0
 end
 
+-- ============ BANDLEADER ============
+-- Meta-system that coordinates all three engineers through a musical journey.
+-- Thinks in song structure: builds energy arcs, creates contrast,
+-- synchronizes and de-synchronizes the engineers for musical effect.
+--
+-- Phases: INTRO > GROOVE > BUILD > PEAK > BREAK > CLIMAX > DISSOLVE > (repeat)
+-- Each phase tells the engineers what energy level, what styles to favor,
+-- when to sync up, when to contrast, when to call+respond.
+
+local BANDLEADER_PHASES = {"INTRO", "GROOVE", "BUILD", "PEAK", "BREAK", "CLIMAX", "DISSOLVE"}
+local bandleader = {
+  active = false,
+  phase = 1,          -- current phase (1-7)
+  phase_bars = 0,     -- bars spent in current phase
+  phase_length = 4,   -- bars until next phase transition
+  energy = 0.3,       -- current energy level (0-1)
+  target_energy = 0.3,
+  bar_count = 0,
+  step_count = 0,
+  -- sync moments: when true, all engineers align their actions
+  sync_pulse = false,
+  -- contrast flag: one engineer pushes while others pull
+  contrast_voice = 0,  -- which engineer is "featured" (0=none, 1=timbre, 2=pattern, 3=filter)
+  contrast_timer = 0,
+}
+
+-- what each phase wants from the engineers
+local PHASE_CONFIG = {
+  -- INTRO: minimal, just kick and one voice, filters closed, timbre gentle
+  { energy = {0.1, 0.3}, timbre_int = {0.1, 0.3}, pat_int = {0, 0.2}, filt_int = {0.1, 0.2},
+    prefer_timbre = {1, 5},    -- SWEEP or BREATHE
+    prefer_pat = {0, 1},       -- off or BUILDER
+    prefer_filt = {0, 1},      -- off or SWEEP
+    mute_chance = {0, 0, 0.8, 0.6, 0.8, 0.9},  -- mostly muted except kick/snare
+  },
+  -- GROOVE: settled rhythm, all voices in, moderate energy
+  { energy = {0.4, 0.6}, timbre_int = {0.2, 0.5}, pat_int = {0.1, 0.3}, filt_int = {0.1, 0.3},
+    prefer_timbre = {6, 7, 8},  -- per-hit styles (MUTATE, SCATTER, RATCHET)
+    prefer_pat = {0, 2},        -- off or SHIFTER
+    prefer_filt = {0, 3},       -- off or RESONATE
+    mute_chance = {0, 0, 0, 0.1, 0.2, 0.3},
+  },
+  -- BUILD: rising energy, increasing density and movement
+  { energy = {0.5, 0.8}, timbre_int = {0.3, 0.7}, pat_int = {0.3, 0.6}, filt_int = {0.2, 0.5},
+    prefer_timbre = {2, 3, 8},  -- PUNCH, MORPH, RATCHET
+    prefer_pat = {1, 3},        -- BUILDER, POLY
+    prefer_filt = {1, 3},       -- SWEEP, RESONATE
+    mute_chance = {0, 0, 0, 0, 0, 0.1},
+  },
+  -- PEAK: maximum energy, everything firing, fills
+  { energy = {0.8, 1.0}, timbre_int = {0.5, 0.9}, pat_int = {0.4, 0.7}, filt_int = {0.3, 0.6},
+    prefer_timbre = {4, 10, 6}, -- GLITCH, SWAP, MUTATE
+    prefer_pat = {4, 5},        -- BREAK, CONDUCTOR
+    prefer_filt = {1, 4},       -- SWEEP, ISOLATE
+    mute_chance = {0, 0, 0, 0, 0, 0},
+  },
+  -- BREAK: sudden drop, strip back, tension
+  { energy = {0.1, 0.3}, timbre_int = {0.1, 0.3}, pat_int = {0, 0.1}, filt_int = {0.2, 0.5},
+    prefer_timbre = {5, 9},     -- BREATHE, DIALECT
+    prefer_pat = {0},           -- off (let patterns breathe)
+    prefer_filt = {2, 4},       -- STROBE, ISOLATE
+    mute_chance = {0, 0.5, 0.7, 0.8, 0.3, 0.9},  -- mostly stripped, keep tone
+  },
+  -- CLIMAX: rebuild fast, hit harder than PEAK
+  { energy = {0.9, 1.0}, timbre_int = {0.6, 1.0}, pat_int = {0.5, 0.8}, filt_int = {0.4, 0.7},
+    prefer_timbre = {4, 10},    -- GLITCH, SWAP
+    prefer_pat = {4, 5},        -- BREAK, CONDUCTOR
+    prefer_filt = {1, 3},       -- SWEEP, RESONATE
+    mute_chance = {0, 0, 0, 0, 0, 0},
+  },
+  -- DISSOLVE: wind down, fade complexity, return toward intro
+  { energy = {0.2, 0.4}, timbre_int = {0.1, 0.4}, pat_int = {0.1, 0.2}, filt_int = {0.1, 0.3},
+    prefer_timbre = {5, 3},     -- BREATHE, MORPH
+    prefer_pat = {1},           -- BUILDER (removing)
+    prefer_filt = {1},          -- SWEEP (closing)
+    mute_chance = {0, 0.2, 0.3, 0.4, 0.3, 0.5},
+  },
+}
+
+local function bandleader_step(step_num)
+  if not bandleader.active then return end
+  bandleader.step_count = bandleader.step_count + 1
+
+  local bar_pos = step_num % 16
+  local beat = step_num % 4
+
+  -- === BAR BOUNDARY: phase management ===
+  if bar_pos == 0 then
+    bandleader.bar_count = bandleader.bar_count + 1
+    bandleader.phase_bars = bandleader.phase_bars + 1
+
+    -- time to transition?
+    if bandleader.phase_bars >= bandleader.phase_length then
+      -- advance phase
+      bandleader.phase = (bandleader.phase % #BANDLEADER_PHASES) + 1
+      bandleader.phase_bars = 0
+      -- each phase has a different natural length
+      local phase_lengths = {3, 6, 4, 4, 2, 4, 3}  -- bars
+      bandleader.phase_length = phase_lengths[bandleader.phase] + math.random(-1, 1)
+      bandleader.phase_length = math.max(2, bandleader.phase_length)
+
+      -- set target energy for new phase
+      local cfg = PHASE_CONFIG[bandleader.phase]
+      bandleader.target_energy = randf(cfg.energy[1], cfg.energy[2])
+
+      -- === PHASE TRANSITION: tell engineers what to do ===
+
+      -- pick styles from the phase's preferred lists
+      if #cfg.prefer_timbre > 0 then
+        local pick = cfg.prefer_timbre[math.random(1, #cfg.prefer_timbre)]
+        timbre.style = pick
+        params:set("timbre_style", pick + 1, true)
+      end
+      if #cfg.prefer_pat > 0 then
+        local pick = cfg.prefer_pat[math.random(1, #cfg.prefer_pat)]
+        pat_eng.style = pick
+        params:set("pat_style", pick + 1, true)
+      end
+      if #cfg.prefer_filt > 0 then
+        local pick = cfg.prefer_filt[math.random(1, #cfg.prefer_filt)]
+        if pick == 0 and filt_eng.style > 0 then filter_engineer_cleanup() end
+        filt_eng.style = pick
+        params:set("filt_style", pick + 1, true)
+      end
+
+      -- set engineer intensities
+      timbre.intensity = randf(cfg.timbre_int[1], cfg.timbre_int[2])
+      params:set("timbre_intensity", timbre.intensity, true)
+      pat_eng.intensity = randf(cfg.pat_int[1], cfg.pat_int[2])
+      params:set("pat_intensity", pat_eng.intensity, true)
+      filt_eng.intensity = randf(cfg.filt_int[1], cfg.filt_int[2])
+      params:set("filt_intensity", filt_eng.intensity, true)
+
+      -- apply initial mute pattern for phase
+      for t = 1, NUM_VOICES do
+        mutes[t] = math.random() < cfg.mute_chance[t]
+      end
+    end
+  end
+
+  -- === ENERGY SLEW: smooth transitions ===
+  bandleader.energy = bandleader.energy + (bandleader.target_energy - bandleader.energy) * 0.02
+
+  -- === SYNC PULSES: every 4-8 bars, create a sync moment ===
+  -- all engineers briefly align their actions
+  bandleader.sync_pulse = false
+  if bar_pos == 0 and bandleader.bar_count % math.random(4, 8) == 0 then
+    bandleader.sync_pulse = true
+    -- sync moment: bump all intensities briefly
+    local bump = 0.2 * bandleader.energy
+    timbre.intensity = math.min(1, timbre.intensity + bump)
+    pat_eng.intensity = math.min(1, pat_eng.intensity + bump)
+    filt_eng.intensity = math.min(1, filt_eng.intensity + bump)
+  end
+
+  -- === CONTRAST: feature one engineer while others rest ===
+  bandleader.contrast_timer = bandleader.contrast_timer - 1
+  if bandleader.contrast_timer <= 0 then
+    if math.random() < 0.15 * bandleader.energy then
+      -- start a contrast moment: one engineer gets boosted, others dim
+      bandleader.contrast_voice = math.random(1, 3)
+      bandleader.contrast_timer = math.random(8, 24)  -- steps
+
+      if bandleader.contrast_voice == 1 then
+        timbre.intensity = math.min(1, timbre.intensity + 0.3)
+        pat_eng.intensity = math.max(0, pat_eng.intensity - 0.2)
+        filt_eng.intensity = math.max(0, filt_eng.intensity - 0.2)
+      elseif bandleader.contrast_voice == 2 then
+        pat_eng.intensity = math.min(1, pat_eng.intensity + 0.3)
+        timbre.intensity = math.max(0, timbre.intensity - 0.2)
+        filt_eng.intensity = math.max(0, filt_eng.intensity - 0.2)
+      else
+        filt_eng.intensity = math.min(1, filt_eng.intensity + 0.3)
+        timbre.intensity = math.max(0, timbre.intensity - 0.2)
+        pat_eng.intensity = math.max(0, pat_eng.intensity - 0.2)
+      end
+    else
+      bandleader.contrast_voice = 0
+    end
+  end
+
+  -- === CALL AND RESPONSE: on beats, sometimes mute/unmute voices ===
+  if beat == 0 and math.random() < 0.08 * bandleader.energy then
+    -- quick mute/unmute of a non-kick voice for rhythmic effect
+    local t = math.random(2, NUM_VOICES)
+    mutes[t] = not mutes[t]
+    -- auto-restore after 4-8 steps
+    clock.run(function()
+      clock.sleep(0.1 * math.random(4, 8))
+      mutes[t] = not mutes[t]
+    end)
+  end
+
+  -- === HARMONIC JOURNEY: shift harmony with energy ===
+  if bar_pos == 0 and bandleader.phase_bars == 0 then
+    -- on phase transitions, consider shifting harmony
+    if bandleader.phase == 3 or bandleader.phase == 6 then
+      -- BUILD and CLIMAX: move up in circle of fifths (tension)
+      harmony.root = (harmony.root + 7) % 12  -- up a fifth
+      params:set("root", harmony.root, true)
+    elseif bandleader.phase == 7 then
+      -- DISSOLVE: return toward original key
+      harmony.root = (harmony.root + 5) % 12  -- down a fifth (= up a fourth)
+      params:set("root", harmony.root, true)
+    end
+
+    -- chord mode shifts with energy
+    if bandleader.energy > 0.7 then
+      harmony.chord_mode = true
+      harmony.chord_type = math.random() < 0.6 and 1 or 2  -- major or minor
+      params:set("chord_mode", 2, true)
+      params:set("chord_type", harmony.chord_type, true)
+    elseif bandleader.energy < 0.3 then
+      if math.random() < 0.4 then
+        harmony.chord_mode = false
+        params:set("chord_mode", 1, true)
+      end
+    end
+  end
+
+  -- === INTENSITY DRIFT: gradual within-phase adjustments ===
+  local cfg = PHASE_CONFIG[bandleader.phase]
+  -- gently nudge intensities toward phase targets
+  local t_target = randf(cfg.timbre_int[1], cfg.timbre_int[2])
+  local p_target = randf(cfg.pat_int[1], cfg.pat_int[2])
+  local f_target = randf(cfg.filt_int[1], cfg.filt_int[2])
+
+  if step_num % 8 == 0 then
+    timbre.intensity = timbre.intensity + (t_target - timbre.intensity) * 0.05
+    pat_eng.intensity = pat_eng.intensity + (p_target - pat_eng.intensity) * 0.05
+    filt_eng.intensity = filt_eng.intensity + (f_target - filt_eng.intensity) * 0.05
+  end
+end
+
 -- ============ FX SYSTEM (Esu's Trifecta-inspired) ============
 
 local fx = {}
@@ -1496,6 +1730,10 @@ local function advance_step()
 
   drift_step()
   react_adjust()
+  -- bandleader runs FIRST — sets intensities and styles for the engineers
+  local bok, berr = pcall(bandleader_step, step)
+  if not bok then print("terra bandleader error: " .. tostring(berr)) end
+  -- then the three engineers execute with bandleader's guidance
   local tok, terr = pcall(timbre_engineer_step, step)
   if not tok then print("terra timbre error: " .. tostring(terr)) end
   local pok, perr = pcall(pattern_engineer_step, step)
@@ -1631,6 +1869,11 @@ local function build_params()
     controlspec.new(0, 1, 'lin', 0.01, 0.5))
   params:set_action("timbre_intensity", function(v) timbre.intensity = v end)
 
+  -- bandleader
+  params:add_separator("BANDLEADER")
+  params:add_option("bandleader", "bandleader", {"off", "on"}, 1)
+  params:set_action("bandleader", function(v) bandleader.active = v == 2 end)
+
   -- pattern engineer
   params:add_separator("PATTERN ENGINEER")
   params:add_option("pat_style", "style", PAT_STYLES, 1)
@@ -1754,19 +1997,30 @@ local function draw_main()
     screen.text(playing and ">" or "STOP")
   end
 
-  -- active engineers indicator
-  local eng_x = 74
-  if drift_mode then
-    screen.level(5); screen.move(eng_x, 7); screen.text("D"); eng_x = eng_x + 7
-  end
-  if timbre.style > 0 then
-    screen.level(6); screen.move(eng_x, 7); screen.text("T"); eng_x = eng_x + 7
-  end
-  if pat_eng.style > 0 then
-    screen.level(6); screen.move(eng_x, 7); screen.text("P"); eng_x = eng_x + 7
-  end
-  if filt_eng.style > 0 then
-    screen.level(6); screen.move(eng_x, 7); screen.text("F"); eng_x = eng_x + 7
+  -- bandleader phase or engineer indicators
+  if bandleader.active then
+    screen.level(12)
+    screen.move(64, 7)
+    local phase_short = string.sub(BANDLEADER_PHASES[bandleader.phase], 1, 5)
+    screen.text(phase_short)
+    -- energy bar
+    screen.level(math.floor(bandleader.energy * 12) + 2)
+    screen.rect(108, 2, math.floor(bandleader.energy * 18), 3)
+    screen.fill()
+  else
+    local eng_x = 74
+    if drift_mode then
+      screen.level(5); screen.move(eng_x, 7); screen.text("D"); eng_x = eng_x + 7
+    end
+    if timbre.style > 0 then
+      screen.level(6); screen.move(eng_x, 7); screen.text("T"); eng_x = eng_x + 7
+    end
+    if pat_eng.style > 0 then
+      screen.level(6); screen.move(eng_x, 7); screen.text("P"); eng_x = eng_x + 7
+    end
+    if filt_eng.style > 0 then
+      screen.level(6); screen.move(eng_x, 7); screen.text("F"); eng_x = eng_x + 7
+    end
   end
 
   -- voice lanes
