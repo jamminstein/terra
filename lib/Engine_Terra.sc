@@ -38,7 +38,7 @@ Engine_Terra : CroneEngine {
 
         // --- Mode 0: FM Percussion (Nymira-inspired 7-partial metallic) ---
         SynthDef(\tf_fm, {
-            arg out, freq=200, amp=0.5, pan=0, detune=0,
+            arg out, dryOut=0, fxSend=1.0, freq=200, amp=0.5, pan=0, detune=0,
                 partial1=1.0, partial2=0.5, partial3=0.3, partial4=0.2,
                 partial5=0.1, partial6=0.08, partial7=0.05,
                 fmIndex=1.0, fmRatio=1.414,
@@ -78,12 +78,13 @@ Engine_Terra : CroneEngine {
             sig = Pan2.ar(sig, pan) + [sigL * spread * 0.4, sigR * spread * 0.4];
             sig = LeakDC.ar(sig);
 
-            Out.ar(out, sig);
+            Out.ar(out, sig * fxSend);           // wet to FX bus
+            Out.ar(dryOut, sig * (1 - fxSend));  // dry to output
         }).add;
 
         // --- Mode 1: Subtractive (classic analog drum synthesis) ---
         SynthDef(\tf_sub, {
-            arg out, freq=200, amp=0.5, pan=0, detune=0,
+            arg out, dryOut=0, fxSend=1.0, freq=200, amp=0.5, pan=0, detune=0,
                 shape=0, pulseWidth=0.5,
                 pitchEnvAmt=4, pitchDecay=0.03,
                 attack=0.001, decay=0.3, curve=(-6),
@@ -124,12 +125,13 @@ Engine_Terra : CroneEngine {
             sig = Pan2.ar(sig, pan) + [sigL * spread * 0.4, sigR * spread * 0.4];
             sig = LeakDC.ar(sig);
 
-            Out.ar(out, sig);
+            Out.ar(out, sig * fxSend);
+            Out.ar(dryOut, sig * (1 - fxSend));
         }).add;
 
         // --- Mode 2: Noise/Filtered (textured, granular-inspired hits) ---
         SynthDef(\tf_noise, {
-            arg out, freq=200, amp=0.5, pan=0, detune=0,
+            arg out, dryOut=0, fxSend=1.0, freq=200, amp=0.5, pan=0, detune=0,
                 noiseType=0, crackle=0.5,
                 grainRate=40, grainDur=0.03,
                 pitchEnvAmt=0, pitchDecay=0.05,
@@ -173,7 +175,8 @@ Engine_Terra : CroneEngine {
             sig = Pan2.ar(sig, pan) + [sigL * spread * 0.4, sigR * spread * 0.4];
             sig = LeakDC.ar(sig);
 
-            Out.ar(out, sig);
+            Out.ar(out, sig * fxSend);
+            Out.ar(dryOut, sig * (1 - fxSend));
         }).add;
 
 
@@ -334,7 +337,7 @@ Engine_Terra : CroneEngine {
 
             synthName = [\tf_fm, \tf_sub, \tf_noise][mode];
             voiceSynths[voice] = Synth(synthName, [
-                \out, fxBus, \freq, freq, \amp, amp, \pan, pan
+                \out, fxBus, \dryOut, context.out_b, \freq, freq, \amp, amp, \pan, pan
             ], pg);
         });
 
@@ -370,7 +373,7 @@ Engine_Terra : CroneEngine {
 
             synthName = [\tf_fm, \tf_sub, \tf_noise][mode];
             voiceSynths[voice] = Synth(synthName, [
-                \out, fxBus, \freq, freq, \amp, amp, \pan, pan,
+                \out, fxBus, \dryOut, context.out_b, \freq, freq, \amp, amp, \pan, pan,
                 \decay, decay, \filterFreq, filterFreq, \filterRes, filterRes,
                 \filterType, filterType.asInteger,
                 \pitchEnvAmt, pitchEnvAmt, \pitchDecay, pitchDecay,
@@ -411,7 +414,7 @@ Engine_Terra : CroneEngine {
             { mode == 2 } { [\noiseType, extra1, \grainRate, extra2, \ringAmt, extra3] };
 
             voiceSynths[voice] = Synth(synthName, [
-                \out, fxBus, \freq, freq, \amp, amp, \pan, pan,
+                \out, fxBus, \dryOut, context.out_b, \freq, freq, \amp, amp, \pan, pan,
                 \decay, decay, \filterFreq, filterFreq, \filterRes, filterRes,
                 \filterType, filterType.asInteger,
                 \pitchEnvAmt, pitchEnvAmt, \pitchDecay, pitchDecay,

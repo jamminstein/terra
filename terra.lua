@@ -103,8 +103,8 @@ for i = 1, NUM_VOICES do
     pitch_env = 2, pitch_decay = 0.05,
     pan = 0, spread = 0.3, detune = 0, amp = 0.8,
     midi_note = 36 + (i - 1) * 4, midi_ch = 10,
+    fx_send = 1.0,  -- 0=dry, 1=full FX send
     -- mode-specific deep synth params
-    -- FM mode (0): fmIndex, fmRatio
     fm_index = 1.0, fm_ratio = 1.414,
     -- Sub mode (1): shape (0=sine..1=pulse), noise_amt, filter_env_amt
     shape = 0, noise_amt = 0, filter_env_amt = 2000,
@@ -117,7 +117,7 @@ local function init_voice_presets()
   -- kick: subtractive sine, big pitch sweep
   voices[1].mode = 1; voices[1].base_freq = 48; voices[1].decay = 0.4
   voices[1].pitch_env = 8; voices[1].pitch_decay = 0.04; voices[1].filter_freq = 2000
-  voices[1].pan = 0; voices[1].amp = 1.0
+  voices[1].pan = 0; voices[1].amp = 1.0; voices[1].fx_send = 0.3
   voices[1].shape = 0; voices[1].noise_amt = 0.1; voices[1].filter_env_amt = 1500
   -- snare: noise
   voices[2].mode = 2; voices[2].base_freq = 72; voices[2].decay = 0.2
@@ -1767,9 +1767,56 @@ local function bandleader_step(step_num)
     end
   end
 
+  -- === PATTERN REGEN: occasionally generate fresh patterns at transitions ===
+  if bar_pos == 0 and bandleader.phase_bars == 0 then
+    -- 30% chance to regenerate 1-3 track patterns on phase change
+    if math.random() < 0.3 then
+      local count = math.random(1, 3)
+      for _ = 1, count do
+        local t = math.random(1, NUM_VOICES)
+        generate_pattern(t)
+      end
+    end
+  end
+
+  -- === CHORUS MEMORY: remember and return to great moments ===
+  if not bandleader.memory then bandleader.memory = {} end
+
+  -- snapshot current state occasionally during high energy
+  if bandleader.energy > 0.7 and bar_pos == 0 and math.random() < 0.15 then
+    -- count active voices this bar
+    local density = 0
+    for t = 1, NUM_VOICES do
+      if not mutes[t] then
+        for s = 1, NUM_STEPS do density = density + seq[t].pattern[s] end
+      end
+    end
+    -- only remember if it's dense enough to be interesting
+    if density > 20 then
+      local mem = { patterns = {}, mutes = {table.unpack(mutes)} }
+      for t = 1, NUM_VOICES do
+        mem.patterns[t] = {table.unpack(seq[t].pattern)}
+      end
+      -- keep max 4 memories, replace oldest
+      if #bandleader.memory >= 4 then table.remove(bandleader.memory, 1) end
+      table.insert(bandleader.memory, mem)
+    end
+  end
+
+  -- recall a memory during BUILD or CLIMAX phases (return to "chorus")
+  if #bandleader.memory > 0 and bar_pos == 0 and bandleader.phase_bars == 0 then
+    local is_high_energy_phase = bandleader.energy > 0.6
+    if is_high_energy_phase and math.random() < 0.25 then
+      local mem = bandleader.memory[math.random(1, #bandleader.memory)]
+      for t = 1, NUM_VOICES do
+        seq[t].pattern = {table.unpack(mem.patterns[t])}
+        mutes[t] = mem.mutes[t]
+      end
+    end
+  end
+
   -- === INTENSITY DRIFT: gradual within-phase adjustments ===
   local cfg = mind.phases[bandleader.phase]
-  -- gently nudge intensities toward phase targets
   local t_target = randf(cfg.timbre_int[1], cfg.timbre_int[2])
   local p_target = randf(cfg.pat_int[1], cfg.pat_int[2])
   local f_target = randf(cfg.filt_int[1], cfg.filt_int[2])
@@ -1876,6 +1923,8 @@ local function trigger_voice(track, velocity)
     v.pitch_env, v.pitch_decay, v.spread, v.detune,
     extra1, extra2, extra3
   )
+  -- set per-voice FX send level
+  engine.voice_param(track - 1, "fxSend", v.fx_send)
   if track == 1 and duck_amt > 0 then engine.duck_trig() end
   flash[track] = 8
 
@@ -1929,22 +1978,40 @@ local function opxy_cc(cc_num, val, ch)
   end
 end
 
--- send voice state to OP-XY as CCs (filter, decay, pan etc)
+-- send voice state to OP-XY as CCs
 local function opxy_send_voice_state(track)
   if not opxy_out then return end
   local v = voices[track]
   local is_drum = track <= 3
   local ch = is_drum and params:get("opxy_drum_ch") or params:get("opxy_melody_ch")
 
-  -- filter cutoff -> CC 32 (0-127 from 60-16000hz)
+  -- filter cutoff -> CC 32
   opxy_cc(OPXY_CC.fil_cut, util.linlin(
     math.log(v.filter_freq), math.log(60), math.log(16000), 0, 127), ch)
   -- filter res -> CC 33
   opxy_cc(OPXY_CC.fil_res, v.filter_res * 127, ch)
   -- pan -> CC 10
   opxy_cc(OPXY_CC.track_pan, (v.pan + 1) * 63.5, ch)
-  -- decay -> CC 21 (amp decay)
+  -- decay -> CC 21
   opxy_cc(OPXY_CC.amp_dec, util.linlin(v.decay, 0.01, 2.0, 0, 127), ch)
+  -- amp -> CC 7
+  opxy_cc(OPXY_CC.track_vol, v.amp * 127, ch)
+end
+
+-- send FX + global state to OP-XY
+local function opxy_send_fx_state()
+  if not opxy_out then return end
+  local ch = params:get("opxy_drum_ch")
+  -- FX sends: param1 of each slot -> send_tape, send_fx1, send_fx2
+  opxy_cc(OPXY_CC.send_tape, fx[1].param1 * 127, ch)
+  opxy_cc(OPXY_CC.send_fx1, fx[2].param1 * 127, ch)
+  opxy_cc(OPXY_CC.send_fx2, fx[3].param1 * 127, ch)
+  -- sidechain/duck -> LFO1
+  opxy_cc(OPXY_CC.lfo1, duck_amt * 127, ch)
+  -- timbre intensity -> LFO2
+  opxy_cc(OPXY_CC.lfo2, timbre.intensity * 127, ch)
+  -- filter engineer intensity -> LFO3
+  opxy_cc(OPXY_CC.lfo3, filt_eng.intensity * 127, ch)
 end
 
 -- ============ MIDI INPUT ============
@@ -1997,6 +2064,32 @@ local function midi_event(data)
     elseif msg.cc == 10 then
       voices[selected_track].pan = msg.val / 63.5 - 1
       params:set("v" .. selected_track .. "_pan", voices[selected_track].pan, true)
+    -- OP-XY knob CCs (two-way control)
+    -- CC 32 = filter cutoff (OP-XY filter knob)
+    elseif msg.cc == 32 then
+      voices[selected_track].filter_freq = util.linexp(msg.val, 0, 127, 60, 16000)
+      params:set("v" .. selected_track .. "_filter", voices[selected_track].filter_freq, true)
+    -- CC 33 = filter resonance
+    elseif msg.cc == 33 then
+      voices[selected_track].filter_res = msg.val / 127
+      params:set("v" .. selected_track .. "_res", voices[selected_track].filter_res, true)
+    -- CC 40 = timbre intensity (LFO1 knob on OP-XY)
+    elseif msg.cc == 40 then
+      timbre.intensity = msg.val / 127
+      params:set("timbre_intensity", timbre.intensity, true)
+    -- CC 41 = pattern intensity
+    elseif msg.cc == 41 then
+      pat_eng.intensity = msg.val / 127
+      params:set("pat_intensity", pat_eng.intensity, true)
+    -- CC 42 = filter eng intensity
+    elseif msg.cc == 42 then
+      filt_eng.intensity = msg.val / 127
+      params:set("filt_intensity", filt_eng.intensity, true)
+    -- CC 43 = duck amount
+    elseif msg.cc == 43 then
+      duck_amt = msg.val / 127
+      engine.duck_amt(duck_amt)
+      params:set("duck_amt", duck_amt, true)
     end
   elseif msg.type == "start" then
     start_sequence()
@@ -2034,11 +2127,12 @@ local function advance_step()
   local fok, ferr = pcall(filter_engineer_step, step)
   if not fok then print("terra filter error: " .. tostring(ferr)) end
 
-  -- send voice state to OP-XY every 4 steps (don't flood MIDI)
+  -- send state to OP-XY every 4 steps
   if opxy_out and step % 4 == 1 then
     for t = 1, NUM_VOICES do
       pcall(opxy_send_voice_state, t)
     end
+    pcall(opxy_send_fx_state)
   end
 
   screen_dirty = true
@@ -2361,6 +2455,9 @@ local function build_params()
     params:add_control("v" .. i .. "_amp", "amp",
       controlspec.new(0, 1, 'lin', 0.01, voices[i].amp))
     params:set_action("v" .. i .. "_amp", function(v) voices[i].amp = v end)
+    params:add_control("v" .. i .. "_send", "fx send",
+      controlspec.new(0, 1, 'lin', 0.01, voices[i].fx_send))
+    params:set_action("v" .. i .. "_send", function(v) voices[i].fx_send = v end)
     params:add_number("v" .. i .. "_euclid", "euclidean pulses", 0, 16, 0)
     params:set_action("v" .. i .. "_euclid", function(v)
       seq[i].euclid_k = v; apply_euclidean(i)
@@ -2645,6 +2742,37 @@ local function draw_main()
       end
     end
   end
+
+  -- bandleader progress bar at very bottom of page 1
+  if bandleader.active then
+    local mind = MINDSET_CONFIGS[bandleader.mindset]
+    local num_ph = #mind.phases
+    local total_w = 126
+    local seg_w = math.floor(total_w / num_ph)
+    for p = 1, num_ph do
+      local px = 1 + (p - 1) * seg_w
+      if p == bandleader.phase then
+        -- current phase: filled, brightness = progress
+        local progress = bandleader.phase_bars / math.max(1, bandleader.phase_length)
+        screen.level(10)
+        screen.rect(px, 63, math.floor(seg_w * progress), 1)
+        screen.fill()
+        screen.level(3)
+        screen.rect(px + math.floor(seg_w * progress), 63, seg_w - math.floor(seg_w * progress), 1)
+        screen.fill()
+      elseif p < bandleader.phase then
+        -- past phases: dim
+        screen.level(2)
+        screen.rect(px, 63, seg_w - 1, 1)
+        screen.fill()
+      else
+        -- future phases: dots
+        screen.level(1)
+        screen.pixel(px + math.floor(seg_w / 2), 63)
+        screen.fill()
+      end
+    end
+  end
 end
 
 local function draw_pattern()
@@ -2712,76 +2840,115 @@ local function draw_pattern()
   screen.text("prob:" .. seq[selected_track].track_prob .. "%")
 end
 
+-- page 3 has two sub-pages: 1=FX chain, 2=engineers dashboard
+local fx_subpage = 1
+
 local function draw_fx()
-  screen.level(15)
-  screen.move(0, 7)
-  screen.text("FX CHAIN")
+  if fx_subpage == 1 then
+    -- === FX CHAIN VIEW ===
+    screen.level(15)
+    screen.move(0, 7)
+    screen.text("FX CHAIN")
+    screen.level(4)
+    screen.move(108, 7)
+    screen.text("1/2")
 
-  -- timbre engineer status in header
-  if timbre.style > 0 then
-    screen.level(10)
-    screen.move(62, 7)
-    screen.text(TIMBRE_STYLES[timbre.style + 1])
-  end
+    for i = 1, NUM_FX_SLOTS do
+      local y = 8 + (i - 1) * 16
+      screen.level(i == selected_fx_slot and 15 or 6)
+      screen.move(0, y + 8)
+      screen.text(i .. ":" .. FX_NAMES[fx[i].type + 1])
 
-  for i = 1, NUM_FX_SLOTS do
-    local y = 8 + (i - 1) * 16
+      if fx[i].type > 0 then
+        local pnames = FX_PARAMS[fx[i].type + 1]
+        screen.level(4)
+        screen.move(58, y + 4)
+        screen.text(pnames[1])
+        screen.level(i == selected_fx_slot and 12 or 6)
+        screen.rect(58, y + 6, math.max(1, fx[i].param1 * 52), 3)
+        screen.fill()
+        screen.level(4)
+        screen.move(58, y + 11)
+        screen.text(pnames[2])
+        screen.level(i == selected_fx_slot and 10 or 5)
+        screen.rect(58, y + 13, math.max(1, fx[i].param2 * 52), 3)
+        screen.fill()
+      end
+    end
 
-    screen.level(i == selected_fx_slot and 15 or 6)
-    screen.move(0, y + 8)
-    screen.text(i .. ":" .. FX_NAMES[fx[i].type + 1])
+    -- duck + looper at bottom
+    screen.level(duck_amt > 0 and 10 or 3)
+    screen.move(0, 63)
+    screen.text("DUCK " .. string.format("%.0f%%", duck_amt * 100))
+    if sc_loop.recording or sc_loop.playing then
+      screen.level(sc_loop.recording and 15 or 8)
+      screen.move(90, 63)
+      screen.text(sc_loop.recording and "REC" or "LOOP")
+    end
 
-    if fx[i].type > 0 then
-      local pnames = FX_PARAMS[fx[i].type + 1]
-      screen.level(4)
-      screen.move(58, y + 4)
-      screen.text(pnames[1])
-      screen.level(i == selected_fx_slot and 12 or 6)
-      local w1 = math.max(1, fx[i].param1 * 52)
-      screen.rect(58, y + 6, w1, 3)
+  else
+    -- === ENGINEERS DASHBOARD ===
+    screen.level(15)
+    screen.move(0, 7)
+    screen.text("ENGINEERS")
+    screen.level(4)
+    screen.move(108, 7)
+    screen.text("2/2")
+
+    -- bandleader
+    screen.level(bandleader.active and 12 or 4)
+    screen.move(0, 16)
+    if bandleader.active then
+      local mind = MINDSET_CONFIGS[bandleader.mindset]
+      local phase_idx = math.min(bandleader.phase, #BANDLEADER_PHASES)
+      screen.text("BL:" .. string.sub(mind.name, 1, 4) .. " " .. string.sub(BANDLEADER_PHASES[phase_idx], 1, 5))
+      -- energy bar
+      screen.level(math.floor(bandleader.energy * 12) + 2)
+      screen.rect(90, 11, math.floor(bandleader.energy * 36), 4)
       screen.fill()
+    else
+      screen.text("BL: off")
+    end
 
-      screen.level(4)
-      screen.move(58, y + 11)
-      screen.text(pnames[2])
-      screen.level(i == selected_fx_slot and 10 or 5)
-      local w2 = math.max(1, fx[i].param2 * 52)
-      screen.rect(58, y + 13, w2, 3)
+    -- timbre engineer
+    screen.level(timbre.style > 0 and 10 or 4)
+    screen.move(0, 27)
+    screen.text("TIM:" .. (timbre.style > 0 and TIMBRE_STYLES[timbre.style + 1] or "off"))
+    if timbre.style > 0 then
+      screen.level(8)
+      screen.rect(90, 22, math.floor(timbre.intensity * 36), 4)
       screen.fill()
     end
-  end
 
-  -- engineer status bar at bottom
-  local ey = 58
-  -- timbre
-  if timbre.style > 0 then
-    screen.level(10)
-    screen.move(0, ey)
-    screen.text("T:" .. string.sub(TIMBRE_STYLES[timbre.style + 1], 1, 3))
-  end
-  -- pattern
-  if pat_eng.style > 0 then
-    screen.level(10)
-    screen.move(30, ey)
-    screen.text("P:" .. string.sub(PAT_STYLES[pat_eng.style + 1], 1, 3))
-  end
-  -- filter
-  if filt_eng.style > 0 then
-    screen.level(10)
-    screen.move(60, ey)
-    screen.text("F:" .. string.sub(FILT_STYLES[filt_eng.style + 1], 1, 3))
-  end
-  -- duck
-  if duck_amt > 0 then
-    screen.level(8)
-    screen.move(90, ey)
-    screen.text("D:" .. string.format("%.0f", duck_amt * 100))
-  end
-  -- looper status
-  if sc_loop.recording or sc_loop.playing then
-    screen.level(sc_loop.recording and 15 or 8)
-    screen.move(110, ey)
-    screen.text(sc_loop.recording and "REC" or "LOOP")
+    -- pattern engineer
+    screen.level(pat_eng.style > 0 and 10 or 4)
+    screen.move(0, 38)
+    screen.text("PAT:" .. (pat_eng.style > 0 and PAT_STYLES[pat_eng.style + 1] or "off"))
+    if pat_eng.style > 0 then
+      screen.level(8)
+      screen.rect(90, 33, math.floor(pat_eng.intensity * 36), 4)
+      screen.fill()
+    end
+
+    -- filter engineer
+    screen.level(filt_eng.style > 0 and 10 or 4)
+    screen.move(0, 49)
+    screen.text("FLT:" .. (filt_eng.style > 0 and FILT_STYLES[filt_eng.style + 1] or "off"))
+    if filt_eng.style > 0 then
+      screen.level(8)
+      screen.rect(90, 44, math.floor(filt_eng.intensity * 36), 4)
+      screen.fill()
+    end
+
+    -- looper + drum brain status
+    screen.level(4)
+    screen.move(0, 60)
+    local status = ""
+    if sc_loop.playing then status = "LOOP " end
+    if sc_loop.recording then status = "REC " end
+    if timbre.drum_brain then status = status .. "BRAIN " end
+    if drift_mode then status = status .. "DRFT " end
+    screen.text(status)
   end
 end
 
@@ -2846,8 +3013,18 @@ local function draw_harmony()
     screen.level(12)
     local ct = {"MAJ", "MIN", "DIM"}
     screen.text(ct[harmony.chord_type])
+    -- show chord note names
+    local chord = get_chord_notes()
+    screen.level(8)
+    screen.move(x, 56)
+    local names = ""
+    for ci, cn in ipairs(chord) do
+      if ci > 1 then names = names .. " " end
+      names = names .. NOTE_NAMES_SHARP[(cn % 12) + 1]
+    end
+    screen.text(names)
   end
-  screen.move(x, 60)
+  screen.move(x, 63)
   screen.level(harmony.drift_rate > 0 and 10 or 4)
   screen.text("drift:" .. harmony.drift_rate)
 end
@@ -2927,12 +3104,22 @@ function enc(n, d)
 
   elseif page == 3 then
     if n == 2 then
-      selected_fx_slot = util.clamp(selected_fx_slot + d, 1, NUM_FX_SLOTS)
+      if fx_subpage == 1 then
+        selected_fx_slot = util.clamp(selected_fx_slot + d, 1, NUM_FX_SLOTS)
+      else
+        -- dashboard: E2 cycles sub-page (future: could select engineer)
+        fx_subpage = util.clamp(fx_subpage + d, 1, 2)
+      end
     elseif n == 3 then
-      local slot = selected_fx_slot
-      fx[slot].type = util.clamp(fx[slot].type + d, 0, #FX_NAMES - 1)
-      set_fx_type(slot, fx[slot].type)
-      params:set("fx" .. slot .. "_type", fx[slot].type + 1, true)
+      if fx_subpage == 1 then
+        local slot = selected_fx_slot
+        fx[slot].type = util.clamp(fx[slot].type + d, 0, #FX_NAMES - 1)
+        set_fx_type(slot, fx[slot].type)
+        params:set("fx" .. slot .. "_type", fx[slot].type + 1, true)
+      else
+        -- dashboard: E3 switches sub-page
+        fx_subpage = util.clamp(fx_subpage + d, 1, 2)
+      end
     end
 
   elseif page == 4 then
@@ -2991,9 +3178,8 @@ function key(n, z)
           params:set("v" .. selected_track .. "_mute", mutes[selected_track] and 2 or 1, true)
         end
       elseif page == 3 then
-        -- cycle timbre engineer style
-        timbre.style = (timbre.style + 1) % (#TIMBRE_STYLES)
-        params:set("timbre_style", timbre.style + 1, true)
+        -- toggle FX subpage (1=FX chain, 2=engineers dashboard)
+        fx_subpage = fx_subpage == 1 and 2 or 1
       elseif page == 4 then
         -- cycle: off > major > minor > dim > off
         if not harmony.chord_mode then
@@ -3043,7 +3229,7 @@ function grid_redraw()
         end
       else
         if s == step and playing then
-          g:led(s, t, 3) -- playhead on empty step
+          g:led(s, t, mutes[t] and 1 or 3) -- playhead dimmer if muted
         else
           g:led(s, t, 0)
         end
@@ -3072,22 +3258,29 @@ function grid_redraw()
   g:led(15, 7, 6)                      -- generate
   g:led(16, 7, 4)                      -- clear
 
-  -- row 8: transport + modes + status
+  -- row 8: transport + modes + presets + chords
   g:led(1, 8, playing and 15 or 4)     -- play/stop
   g:led(2, 8, drift_mode and 12 or 3)  -- drift
   g:led(3, 8, react_mode and 12 or 3)  -- react
+  g:led(4, 8, bandleader.active and 12 or 3)  -- bandleader
 
-  -- euclidean pulse count indicator for selected track (cols 5-12)
-  local ek = seq[selected_track].euclid_k
-  for c = 5, 12 do
-    local pulse_idx = c - 4
-    g:led(c, 8, pulse_idx <= ek and 8 or 2)
+  -- preset recall slots (cols 5-8)
+  for c = 5, 8 do
+    local slot = c - 4
+    g:led(c, 8, presets[slot] and 8 or 2)
   end
 
-  -- chord mode indicators (cols 14-16)
-  g:led(14, 8, harmony.chord_mode and (harmony.chord_type == 1 and 12 or 4) or 2) -- major
-  g:led(15, 8, harmony.chord_mode and (harmony.chord_type == 2 and 12 or 4) or 2) -- minor
-  g:led(16, 8, harmony.chord_mode and (harmony.chord_type == 3 and 12 or 4) or 2) -- dim
+  -- euclidean count (cols 9-12)
+  local ek = seq[selected_track].euclid_k
+  for c = 9, 12 do
+    local pulse_idx = c - 8
+    g:led(c, 8, pulse_idx <= (ek / 2) and 8 or 2)  -- compressed display
+  end
+
+  -- chord mode (cols 14-16)
+  g:led(14, 8, harmony.chord_mode and (harmony.chord_type == 1 and 12 or 4) or 2)
+  g:led(15, 8, harmony.chord_mode and (harmony.chord_type == 2 and 12 or 4) or 2)
+  g:led(16, 8, harmony.chord_mode and (harmony.chord_type == 3 and 12 or 4) or 2)
 
   g:refresh()
 end
@@ -3144,6 +3337,7 @@ g.key = function(x, y, z)
       paste_pattern(selected_track)
     elseif x == 15 then
       generate_pattern(selected_track)
+      gen_flash = 8
     elseif x == 16 then
       -- clear selected track
       for s = 1, NUM_STEPS do
@@ -3160,14 +3354,31 @@ g.key = function(x, y, z)
       drift_mode = not drift_mode
     elseif x == 3 then
       react_mode = not react_mode
-    elseif x >= 5 and x <= 12 then
-      -- set euclidean pulses for selected track
-      local pulses = x - 4
-      -- toggle: if already at this value, turn off
+    elseif x == 4 then
+      -- toggle bandleader
+      if bandleader.active then
+        bandleader.active = false
+        params:set("bandleader", 1, true)
+      else
+        bandleader.active = true
+        bandleader.mindset = bandleader.mindset > 0 and bandleader.mindset or 1
+        params:set("bandleader", bandleader.mindset + 1, true)
+      end
+    elseif x >= 5 and x <= 8 then
+      -- preset recall (slots 1-4)
+      local slot = x - 4
+      if presets[slot] then
+        load_preset(slot)
+      else
+        -- if empty, save to this slot
+        save_preset(slot)
+      end
+    elseif x >= 9 and x <= 12 then
+      -- euclidean (compressed: 2,4,6,8 pulses)
+      local pulses = (x - 8) * 2
       if seq[selected_track].euclid_k == pulses then
         seq[selected_track].euclid_k = 0
         params:set("v" .. selected_track .. "_euclid", 0, true)
-        -- keep current pattern
       else
         seq[selected_track].euclid_k = pulses
         params:set("v" .. selected_track .. "_euclid", pulses, true)
