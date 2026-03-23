@@ -403,7 +403,38 @@ local KICK_BRAIN = {
   -- broken: detuned FM, glitchy character
   {mode=0, freq=46, decay=0.28, fm_index=4.0, fm_ratio=0.75, filter_freq=2500, filter_res=0.4,
    filter_type=0, pitch_env=9, pitch_decay=0.018, spread=0.25},
+  -- WILD CARD: fully random but constrained to kick-valid ranges
+  "random",
 }
+
+-- generate a random-but-good kick on the fly
+local function random_kick()
+  local mode = ({0, 1, 2})[math.random(1, 3)]
+  local p = {
+    mode = mode,
+    freq = math.random(35, 65),
+    decay = randf(0.1, 0.8),
+    filter_freq = randf(400, 5000),
+    filter_res = randf(0.05, 0.6),
+    filter_type = 0,  -- kicks almost always want LP
+    pitch_env = randf(2, 16),
+    pitch_decay = randf(0.008, 0.06),
+    spread = randf(0, 0.3),
+  }
+  if mode == 0 then
+    p.fm_index = randf(0.3, 5)
+    p.fm_ratio = ({0.5, 0.75, 1, 1.5, 2})[math.random(1, 5)]
+  elseif mode == 1 then
+    p.shape = randf(0, 0.5)
+    p.noise_amt = randf(0, 0.5)
+    p.filter_env_amt = randf(300, 4000)
+  elseif mode == 2 then
+    p.noise_type = randf(0, 0.7)
+    p.grain_rate = randf(30, 120)
+    p.ring_amt = randf(0, 0.3)
+  end
+  return p
+end
 
 local SNARE_BRAIN = {
   -- tight acoustic: noise + tone, crisp
@@ -442,7 +473,38 @@ local SNARE_BRAIN = {
   -- ghost note: barely there, ultra short, quiet
   {mode=2, freq=200, decay=0.04, noise_type=0, grain_rate=100, ring_amt=0, filter_freq=4000,
    filter_res=0.2, filter_type=0, pitch_env=1, pitch_decay=0.01, spread=0.1},
+  -- WILD CARD: fully random but constrained to snare-valid ranges
+  "random",
 }
+
+-- generate a random-but-good snare on the fly
+local function random_snare()
+  local mode = ({0, 1, 2})[math.random(1, 3)]
+  local p = {
+    mode = mode,
+    freq = math.random(120, 280),
+    decay = randf(0.04, 0.35),
+    filter_freq = randf(2000, 10000),
+    filter_res = randf(0.1, 0.8),
+    filter_type = math.random(0, 2),
+    pitch_env = randf(0, 8),
+    pitch_decay = randf(0.005, 0.04),
+    spread = randf(0.05, 0.5),
+  }
+  if mode == 0 then
+    p.fm_index = randf(0.5, 5)
+    p.fm_ratio = ({1, 1.414, 1.5, 2, 2.5, 3, 3.5, 4.5})[math.random(1, 8)]
+  elseif mode == 1 then
+    p.shape = randf(0, 1)
+    p.noise_amt = randf(0.1, 0.8)
+    p.filter_env_amt = randf(500, 5000)
+  elseif mode == 2 then
+    p.noise_type = randf(0, 1)
+    p.grain_rate = randf(15, 150)
+    p.ring_amt = randf(0, 0.6)
+  end
+  return p
+end
 
 -- apply a drum brain preset to a voice, with optional blend amount
 local function apply_drum_preset(v, preset, blend)
@@ -481,15 +543,16 @@ local function drum_brain_hit(track)
   if track == 1 then
     -- KICK: pick from kick brain
     if math.random() < 0.15 + int * 0.25 then
-      local preset = KICK_BRAIN[math.random(1, #KICK_BRAIN)]
-      -- blend amount: sometimes subtle morph, sometimes full snap
+      local entry = KICK_BRAIN[math.random(1, #KICK_BRAIN)]
+      local preset = entry == "random" and random_kick() or entry
       local blend = math.random() < 0.3 * int and 1.0 or randf(0.2, 0.6) * int
       apply_drum_preset(v, preset, blend)
     end
   elseif track == 2 then
     -- SNARE: pick from snare brain
     if math.random() < 0.15 + int * 0.25 then
-      local preset = SNARE_BRAIN[math.random(1, #SNARE_BRAIN)]
+      local entry = SNARE_BRAIN[math.random(1, #SNARE_BRAIN)]
+      local preset = entry == "random" and random_snare() or entry
       local blend = math.random() < 0.3 * int and 1.0 or randf(0.2, 0.6) * int
       apply_drum_preset(v, preset, blend)
     end
