@@ -60,6 +60,8 @@ for i = 1, NUM_VOICES do flash[i] = 0 end
 -- pattern clipboard
 local clipboard = nil  -- {pattern, prob, vel}
 local gen_flash = 0    -- countdown for "GEN" indicator
+local k3_press_time = 0  -- for hold detection
+local K3_HOLD_TIME = 0.4 -- seconds to count as hold
 local screen_dirty = true
 local grid_dirty = true
 
@@ -1323,7 +1325,11 @@ local function draw_main()
   screen.text("TERRA")
   screen.level(playing and 15 or 4)
   screen.move(40, 7)
-  if gen_flash > 0 then
+  if gen_flash > 10 then
+    screen.level(15)
+    screen.text("GEN ALL")
+    gen_flash = gen_flash - 1
+  elseif gen_flash > 0 then
     screen.level(15)
     screen.text("GEN " .. VOICE_SHORT[selected_track])
     gen_flash = gen_flash - 1
@@ -1685,27 +1691,48 @@ function key(n, z)
     end
   elseif n == 3 then
     if z == 1 then
+      k3_press_time = util.time()
       if k2_held then
         -- K2+K3: toggle drift + react
         drift_mode = not drift_mode
         react_mode = drift_mode
-      elseif page == 1 then
-        -- generate new pattern for selected track
-        generate_pattern(selected_track)
-        gen_flash = 8
+      end
+    elseif z == 0 and not k2_held then
+      -- K3 release: check hold vs tap
+      local held = (util.time() - k3_press_time) >= K3_HOLD_TIME
+
+      if page == 1 then
+        if held then
+          -- HOLD: regenerate ALL patterns
+          for i = 1, NUM_VOICES do generate_pattern(i) end
+          gen_flash = 12
+        else
+          -- TAP: generate selected track only
+          generate_pattern(selected_track)
+          gen_flash = 8
+        end
       elseif page == 2 then
-        -- toggle mute for selected track
-        mutes[selected_track] = not mutes[selected_track]
-        params:set("v" .. selected_track .. "_mute", mutes[selected_track] and 2 or 1, true)
+        if held then
+          -- HOLD: toggle all mutes
+          local any_muted = false
+          for i = 1, NUM_VOICES do if mutes[i] then any_muted = true end end
+          for i = 1, NUM_VOICES do
+            mutes[i] = not any_muted
+            params:set("v" .. i .. "_mute", mutes[i] and 2 or 1, true)
+          end
+        else
+          -- TAP: toggle mute for selected track
+          mutes[selected_track] = not mutes[selected_track]
+          params:set("v" .. selected_track .. "_mute", mutes[selected_track] and 2 or 1, true)
+        end
       elseif page == 3 then
         -- cycle timbre engineer style
         timbre.style = (timbre.style + 1) % (#TIMBRE_STYLES)
         params:set("timbre_style", timbre.style + 1, true)
       elseif page == 4 then
-        -- cycle: off → major → minor → dim → off
+        -- cycle: off > major > minor > dim > off
         if not harmony.chord_mode then
-          harmony.chord_mode = true
-          harmony.chord_type = 1
+          harmony.chord_mode = true; harmony.chord_type = 1
         elseif harmony.chord_type < 3 then
           harmony.chord_type = harmony.chord_type + 1
         else
