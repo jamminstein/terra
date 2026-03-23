@@ -324,7 +324,8 @@ end
 -- 4=GLITCH: chaotic jumps into the extremes of each voice's synthesis capabilities
 -- 5=BREATHE: organic golden-ratio waves, each voice a different organism
 
-local TIMBRE_STYLES = {"off", "SWEEP", "PUNCH", "MORPH", "GLITCH", "BREATHE", "MUTATE"}
+local TIMBRE_STYLES = {"off", "SWEEP", "PUNCH", "MORPH", "GLITCH", "BREATHE",
+  "MUTATE", "SCATTER", "RATCHET", "DIALECT"}
 local timbre = {
   style = 0,
   intensity = 0.5,
@@ -610,12 +611,13 @@ local function mutate_snapshot_home(t)
 end
 
 -- mutate a voice at the moment of triggering (called from trigger_voice)
+-- styles 6-9 all use per-hit mutation but with different characters
 local function mutate_on_hit(t)
-  if timbre.style ~= 6 then return end  -- 6 = MUTATE style
+  -- only active for per-hit styles (6=MUTATE, 7=SCATTER, 8=RATCHET, 9=DIALECT)
+  if timbre.style < 6 then return end
 
   local v = voices[t]
   local int = timbre.intensity
-  local w = mutate.wander[t]
 
   -- initialize home if needed
   if not mutate.home[t] then mutate_snapshot_home(t) end
@@ -623,147 +625,239 @@ local function mutate_on_hit(t)
 
   mutate.hits[t] = mutate.hits[t] + 1
 
-  -- direction logic: explore for 8-24 hits, then return for 4-12 hits
-  if mutate.direction[t] == 1 then
-    -- exploring: wander increases
-    mutate.wander[t] = math.min(1, w + randf(0.02, 0.08) * int)
-    -- after enough hits, start returning
-    if mutate.hits[t] > math.random(8, 24) then
-      mutate.direction[t] = -1
-      mutate.hits[t] = 0
+  -- === STYLE 6: MUTATE — wander + return ===
+  if timbre.style == 6 then
+    local w = mutate.wander[t]
+
+    -- direction logic: explore 8-24 hits, return 4-12
+    if mutate.direction[t] == 1 then
+      mutate.wander[t] = math.min(1, w + randf(0.02, 0.08) * int)
+      if mutate.hits[t] > math.random(8, 24) then
+        mutate.direction[t] = -1; mutate.hits[t] = 0
+      end
+    else
+      mutate.wander[t] = math.max(0, w - randf(0.04, 0.12))
+      if mutate.wander[t] < 0.05 or mutate.hits[t] > math.random(4, 12) then
+        mutate.direction[t] = 1; mutate.hits[t] = 0
+        mutate_snapshot_home(t)
+      end
     end
-  else
-    -- returning: wander decreases
-    mutate.wander[t] = math.max(0, w - randf(0.04, 0.12))
-    -- after returning close to home, re-snapshot and explore again
-    if mutate.wander[t] < 0.05 or mutate.hits[t] > math.random(4, 12) then
-      mutate.direction[t] = 1
-      mutate.hits[t] = 0
-      mutate_snapshot_home(t)  -- new home = wherever we are now
+
+    w = mutate.wander[t]
+    local amount = w * int
+    local cc = 0.3 + amount * 0.5  -- change chance
+
+    if math.random() < cc then
+      v.filter_freq = util.clamp(
+        home.filter_freq * (2 ^ (randf(-1, 1) * 2 * amount)), 60, 16000)
     end
-  end
+    if math.random() < cc * 0.7 then
+      v.filter_res = util.clamp(home.filter_res + randf(-0.4, 0.4) * amount, 0.05, 0.95)
+    end
+    if math.random() < cc * 0.8 then
+      v.decay = util.clamp(home.decay * (1 + randf(-0.6, 0.8) * amount), 0.02, 1.5)
+    end
+    if math.random() < cc * 0.6 then
+      v.pitch_env = math.max(0, home.pitch_env + randf(-4, 8) * amount)
+    end
+    if math.random() < cc * 0.5 then
+      v.pan = util.clamp(home.pan + randf(-0.8, 0.8) * amount, -1, 1)
+    end
+    if math.random() < cc * 0.3 then v.spread = randf(0, 1) * amount end
+    if math.random() < cc * 0.3 then v.detune = randf(-8, 8) * amount end
+    if math.random() < 0.05 * amount then v.filter_type = math.random(0, 2) end
+    if math.random() < cc then sculpt_deep(v, t, randf(-1, 1) * amount) end
 
-  w = mutate.wander[t]
+  -- === STYLE 7: SCATTER — each hit picks from a palette of presets ===
+  -- like a drummer switching between sticks/mallets/brushes per hit
+  elseif timbre.style == 7 then
+    -- define character "palettes" per voice role
+    local palettes = {
+      -- kick palettes: deep/tight/punchy/boomy
+      {{filt=800, res=0.2, dec=0.6, pe=10, pd=0.03},
+       {filt=2000, res=0.4, dec=0.15, pe=4, pd=0.08},
+       {filt=1200, res=0.6, dec=0.3, pe=6, pd=0.05},
+       {filt=400, res=0.15, dec=0.8, pe=12, pd=0.02}},
+      -- snare palettes: crack/brush/rim/ghost
+      {{filt=6000, res=0.5, dec=0.15, pe=3, pd=0.04},
+       {filt=3000, res=0.3, dec=0.25, pe=1, pd=0.08},
+       {filt=8000, res=0.7, dec=0.08, pe=6, pd=0.02},
+       {filt=2000, res=0.2, dec=0.12, pe=2, pd=0.05}},
+      -- hat palettes: closed/open/sizzle/chick
+      {{filt=10000, res=0.4, dec=0.04, pe=0, pd=0.02},
+       {filt=6000, res=0.3, dec=0.25, pe=0, pd=0.03},
+       {filt=14000, res=0.6, dec=0.12, pe=1, pd=0.01},
+       {filt=4000, res=0.8, dec=0.02, pe=0, pd=0.01}},
+      -- perc palettes: bell/click/wood/metal
+      {{filt=8000, res=0.3, dec=0.4, pe=2, pd=0.06},
+       {filt=3000, res=0.5, dec=0.05, pe=8, pd=0.02},
+       {filt=5000, res=0.2, dec=0.1, pe=4, pd=0.04},
+       {filt=12000, res=0.7, dec=0.2, pe=1, pd=0.03}},
+      -- tone palettes: bell/pluck/pad/glass
+      {{filt=10000, res=0.2, dec=0.6, pe=1, pd=0.08},
+       {filt=4000, res=0.4, dec=0.2, pe=3, pd=0.03},
+       {filt=6000, res=0.15, dec=0.8, pe=0.5, pd=0.1},
+       {filt=14000, res=0.5, dec=0.3, pe=2, pd=0.05}},
+      -- fx palettes: zap/swirl/click/wash
+      {{filt=2000, res=0.8, dec=0.1, pe=12, pd=0.01},
+       {filt=6000, res=0.4, dec=0.4, pe=3, pd=0.06},
+       {filt=800, res=0.6, dec=0.03, pe=8, pd=0.02},
+       {filt=4000, res=0.2, dec=0.5, pe=1, pd=0.08}},
+    }
 
-  -- the mutation amount scales with wander distance AND intensity
-  -- near home (w~0): subtle variations. far out (w~1): wild changes
-  local amount = w * int
+    local pal = palettes[t] or palettes[1]
+    -- weighted random: bias toward neighboring presets for smoother changes
+    local idx = math.random(1, #pal)
+    local p = pal[idx]
+    local blend = 0.3 + int * 0.5  -- how much to apply (more at high intensity)
 
-  -- chance-based: not every param changes every hit
-  -- more params change as we wander further out
-  local change_chance = 0.3 + amount * 0.5  -- 30% near home, 80% far out
+    v.filter_freq = util.clamp(v.filter_freq * (1 - blend) + p.filt * blend, 60, 16000)
+    v.filter_res = v.filter_res * (1 - blend) + p.res * blend
+    v.decay = util.clamp(v.decay * (1 - blend) + p.dec * blend, 0.02, 1.5)
+    v.pitch_env = v.pitch_env * (1 - blend) + p.pe * blend
+    v.pitch_decay = v.pitch_decay * (1 - blend) + p.pd * blend
 
-  -- filter freq: the most audible parameter
-  if math.random() < change_chance then
-    local target = home.filter_freq * (2 ^ (randf(-1, 1) * 2 * amount))
+    -- scatter pan on each hit
+    v.pan = util.clamp(v.pan + randf(-0.4, 0.4) * int, -1, 1)
+
+    -- deep params: small random walk per hit
+    sculpt_deep(v, t, randf(-0.5, 0.5) * int)
+
+    -- occasionally snap to very different palette entry
+    if math.random() < 0.1 * int then
+      local wild = pal[math.random(1, #pal)]
+      v.filter_freq = util.clamp(wild.filt, 60, 16000)
+      v.decay = util.clamp(wild.dec, 0.02, 1.5)
+      v.pitch_env = wild.pe
+    end
+
+  -- === STYLE 8: RATCHET — rhythmic cycling through param sets ===
+  -- like a sequencer within the sequencer: params rotate through
+  -- a cycle of configurations, creating repeating timbral patterns
+  elseif timbre.style == 8 then
+    -- cycle length varies per voice (prime numbers for polyrhythmic feel)
+    local cycles = {3, 5, 7, 4, 6, 8}
+    local cycle_len = cycles[t]
+    local pos = mutate.hits[t] % cycle_len
+    local phase = pos / cycle_len  -- 0..1 position in cycle
+
+    -- parameters follow smooth curves through the cycle
+    local wave = math.sin(phase * 2 * math.pi)
+    local wave2 = math.cos(phase * 2 * math.pi)
+    local wave3 = math.sin(phase * 4 * math.pi)  -- double speed
+
     v.filter_freq = util.clamp(
-      v.filter_freq * (1 - amount * 0.5) + target * amount * 0.5,
-      60, 16000)
-  end
-
-  -- filter resonance
-  if math.random() < change_chance * 0.7 then
+      home.filter_freq * (1 + wave * 1.5 * int), 60, 16000)
     v.filter_res = util.clamp(
-      home.filter_res + randf(-0.4, 0.4) * amount,
-      0.05, 0.95)
-  end
-
-  -- decay: shorter or longer hits
-  if math.random() < change_chance * 0.8 then
+      home.filter_res + wave2 * 0.3 * int, 0.05, 0.95)
     v.decay = util.clamp(
-      home.decay * (1 + randf(-0.6, 0.8) * amount),
-      0.02, 1.5)
-  end
-
-  -- pitch envelope: subtle to extreme pitch swoops
-  if math.random() < change_chance * 0.6 then
+      home.decay * (1 + wave3 * 0.5 * int), 0.02, 1.5)
     v.pitch_env = math.max(0,
-      home.pitch_env + randf(-4, 8) * amount)
-  end
-
-  -- pitch decay
-  if math.random() < change_chance * 0.4 then
+      home.pitch_env * (1 + wave * int))
     v.pitch_decay = util.clamp(
-      home.pitch_decay * (1 + randf(-0.5, 1.0) * amount),
-      0.003, 0.3)
-  end
-
-  -- pan: spatial movement
-  if math.random() < change_chance * 0.5 then
+      home.pitch_decay * (1 + wave2 * 0.6 * int), 0.003, 0.3)
     v.pan = util.clamp(
-      home.pan + randf(-0.8, 0.8) * amount,
-      -1, 1)
-  end
+      home.pan + wave * 0.5 * int, -1, 1)
+    v.spread = util.clamp(math.abs(wave2) * int, 0, 1)
 
-  -- spread: stereo width
-  if math.random() < change_chance * 0.3 then
-    v.spread = util.clamp(randf(0, 1) * amount, 0, 1)
-  end
+    -- deep params cycle on the slower wave
+    sculpt_deep(v, t, wave * 0.4 * int)
 
-  -- detune
-  if math.random() < change_chance * 0.3 then
-    v.detune = randf(-8, 8) * amount
-  end
+    -- every full cycle, slightly shift the home point (slow drift)
+    if pos == 0 and math.random() < 0.4 * int then
+      mutate_snapshot_home(t)
+      -- nudge home in a random direction
+      if mutate.home[t] then
+        mutate.home[t].filter_freq = util.clamp(
+          mutate.home[t].filter_freq * randf(0.7, 1.4), 60, 16000)
+        mutate.home[t].decay = util.clamp(
+          mutate.home[t].decay * randf(0.7, 1.4), 0.02, 1.5)
+      end
+    end
 
-  -- filter type: rare shift (more likely when far out)
-  if math.random() < 0.05 * amount then
-    v.filter_type = math.random(0, 2)
-  end
+  -- === STYLE 9: DIALECT — each voice develops its own "vocabulary" ===
+  -- voices remember configurations they've visited and revisit favorites,
+  -- gradually building a repertoire of sound "words" they cycle through
+  elseif timbre.style == 9 then
+    -- vocabulary: store up to 6 configurations per voice
+    if not mutate.vocab then
+      mutate.vocab = {}
+      for i = 1, NUM_VOICES do mutate.vocab[i] = {} end
+    end
+    local vocab = mutate.vocab[t]
 
-  -- amp: subtle dynamics variation
-  if math.random() < change_chance * 0.4 then
-    v.amp = util.clamp(
-      home.amp * (1 + randf(-0.2, 0.15) * amount),
-      0.1, 1.0)
-  end
+    -- chance to "learn" current config (add to vocabulary)
+    if #vocab < 6 and math.random() < 0.15 * int then
+      table.insert(vocab, {
+        filter_freq = v.filter_freq,
+        filter_res = v.filter_res,
+        decay = v.decay,
+        pitch_env = v.pitch_env,
+        pitch_decay = v.pitch_decay,
+        pan = v.pan,
+        spread = v.spread,
+        fm_index = v.fm_index, fm_ratio = v.fm_ratio,
+        shape = v.shape, noise_amt = v.noise_amt,
+        noise_type = v.noise_type, grain_rate = v.grain_rate, ring_amt = v.ring_amt,
+      })
+    end
 
-  -- deep mode-specific mutation (the soul of each voice)
-  if math.random() < change_chance then
-    if v.mode == 0 then
-      -- FM: index controls harmonic density, ratio controls character
+    if #vocab > 0 and math.random() < 0.5 + int * 0.3 then
+      -- "speak": pick a word from vocabulary (weighted toward recent)
+      local weights = {}
+      for i = 1, #vocab do weights[i] = i end  -- newer = higher weight
+      local total = #vocab * (#vocab + 1) / 2
+      local r = math.random() * total
+      local pick = 1
+      local sum = 0
+      for i = 1, #vocab do
+        sum = sum + i
+        if r <= sum then pick = i; break end
+      end
+
+      local word = vocab[pick]
+      local blend = 0.4 + int * 0.4
+
+      v.filter_freq = util.clamp(v.filter_freq * (1 - blend) + word.filter_freq * blend, 60, 16000)
+      v.filter_res = v.filter_res * (1 - blend) + word.filter_res * blend
+      v.decay = util.clamp(v.decay * (1 - blend) + word.decay * blend, 0.02, 1.5)
+      v.pitch_env = v.pitch_env * (1 - blend) + word.pitch_env * blend
+      v.pitch_decay = v.pitch_decay * (1 - blend) + word.pitch_decay * blend
+      v.pan = util.clamp(v.pan * (1 - blend) + word.pan * blend, -1, 1)
+
+      -- apply deep params from word
+      if v.mode == 0 and word.fm_index then
+        v.fm_index = v.fm_index * (1 - blend) + word.fm_index * blend
+        v.fm_ratio = v.fm_ratio * (1 - blend) + word.fm_ratio * blend
+      elseif v.mode == 1 and word.shape then
+        v.shape = v.shape * (1 - blend) + word.shape * blend
+        v.noise_amt = v.noise_amt * (1 - blend) + word.noise_amt * blend
+      elseif v.mode == 2 and word.noise_type then
+        v.noise_type = v.noise_type * (1 - blend) + word.noise_type * blend
+        v.grain_rate = v.grain_rate * (1 - blend) + word.grain_rate * blend
+        v.ring_amt = v.ring_amt * (1 - blend) + word.ring_amt * blend
+      end
+    else
+      -- "improvise": random variation (adds new sounds to learn from)
+      local amount = int * 0.5
       if math.random() < 0.6 then
-        v.fm_index = util.clamp(
-          home.fm_index + randf(-2, 3) * amount, 0, 8)
+        v.filter_freq = util.clamp(v.filter_freq * randf(0.6, 1.6), 60, 16000)
       end
       if math.random() < 0.4 then
-        -- bias toward harmonic ratios occasionally
-        if math.random() < 0.3 then
-          -- snap to musical ratio
-          local ratios = {0.5, 1, 1.414, 1.5, 2, 2.5, 3, 3.5, 4, 5}
-          v.fm_ratio = ratios[math.random(#ratios)]
-        else
-          v.fm_ratio = util.clamp(
-            home.fm_ratio + randf(-1.5, 2) * amount, 0.25, 7)
-        end
-      end
-    elseif v.mode == 1 then
-      -- Sub: waveform shape is the character knob
-      if math.random() < 0.5 then
-        v.shape = util.clamp(
-          home.shape + randf(-0.3, 0.3) * amount, 0, 1)
+        v.decay = util.clamp(v.decay * randf(0.5, 1.8), 0.02, 1.5)
       end
       if math.random() < 0.4 then
-        v.noise_amt = util.clamp(
-          home.noise_amt + randf(-0.3, 0.4) * amount, 0, 1)
+        v.pitch_env = math.max(0, v.pitch_env + randf(-3, 5) * amount)
       end
       if math.random() < 0.3 then
-        v.filter_env_amt = util.clamp(
-          home.filter_env_amt + randf(-2000, 3000) * amount, 0, 8000)
+        v.pan = util.clamp(v.pan + randf(-0.5, 0.5) * amount, -1, 1)
       end
-    elseif v.mode == 2 then
-      -- Noise: texture type and density are the character
-      if math.random() < 0.5 then
-        v.noise_type = util.clamp(
-          home.noise_type + randf(-0.3, 0.3) * amount, 0, 1)
-      end
-      if math.random() < 0.5 then
-        v.grain_rate = util.clamp(
-          home.grain_rate * (1 + randf(-0.5, 0.8) * amount), 5, 200)
-      end
-      if math.random() < 0.3 then
-        v.ring_amt = util.clamp(
-          home.ring_amt + randf(-0.2, 0.3) * amount, 0, 1)
-      end
+      sculpt_deep(v, t, randf(-0.5, 0.5) * amount)
+    end
+
+    -- chance to "forget" oldest word (keeps vocabulary fresh)
+    if #vocab > 3 and math.random() < 0.03 * int then
+      table.remove(vocab, 1)
     end
   end
 end
