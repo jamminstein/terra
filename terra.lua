@@ -2372,16 +2372,21 @@ local function draw_main()
   for t = 1, NUM_VOICES do
     local y = 10 + (t - 1) * 9
 
-    -- trigger flash: bright bar behind the track name when voice fires
-    if flash[t] > 0 then
-      screen.level(math.floor(flash[t] / 2))
-      screen.rect(0, y - 1, 128, 7)
-      screen.fill()
+    -- selected track indicator: arrow
+    if t == selected_track then
+      screen.level(15)
+      screen.move(0, y + 5)
+      screen.text(">")
     end
 
-    -- track name (dim if muted)
-    screen.level(mutes[t] and 2 or (t == selected_track and 15 or 5))
-    screen.move(0, y + 6)
+    -- track name (dim if muted, bright if selected)
+    local name_level = mutes[t] and 2 or (t == selected_track and 15 or 5)
+    -- trigger flash: briefly boost name brightness
+    if flash[t] > 0 then
+      name_level = math.min(15, name_level + flash[t])
+    end
+    screen.level(name_level)
+    screen.move(5, y + 6)
     screen.text(VOICE_SHORT[t])
 
     -- probability indicator
