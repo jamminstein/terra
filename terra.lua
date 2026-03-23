@@ -1265,73 +1265,124 @@ end
 -- Each phase tells the engineers what energy level, what styles to favor,
 -- when to sync up, when to contrast, when to call+respond.
 
+local BANDLEADER_STYLES = {"off", "JOURNEY", "MANTRA", "JAZZ", "TECHNO", "AMBIENT"}
 local BANDLEADER_PHASES = {"INTRO", "GROOVE", "BUILD", "PEAK", "BREAK", "CLIMAX", "DISSOLVE"}
 local bandleader = {
   active = false,
-  phase = 1,          -- current phase (1-7)
-  phase_bars = 0,     -- bars spent in current phase
-  phase_length = 4,   -- bars until next phase transition
-  energy = 0.3,       -- current energy level (0-1)
+  mindset = 1,        -- 1=JOURNEY, 2=MANTRA, 3=JAZZ, 4=TECHNO, 5=AMBIENT
+  phase = 1,
+  phase_bars = 0,
+  phase_length = 4,
+  energy = 0.3,
   target_energy = 0.3,
   bar_count = 0,
   step_count = 0,
-  -- sync moments: when true, all engineers align their actions
   sync_pulse = false,
-  -- contrast flag: one engineer pushes while others pull
-  contrast_voice = 0,  -- which engineer is "featured" (0=none, 1=timbre, 2=pattern, 3=filter)
+  contrast_voice = 0,
   contrast_timer = 0,
 }
 
--- what each phase wants from the engineers
-local PHASE_CONFIG = {
-  -- INTRO: minimal, just kick and one voice, filters closed, timbre gentle
-  { energy = {0.1, 0.3}, timbre_int = {0.1, 0.3}, pat_int = {0, 0.2}, filt_int = {0.1, 0.2},
-    prefer_timbre = {1, 5},    -- SWEEP or BREATHE
-    prefer_pat = {0, 1},       -- off or BUILDER
-    prefer_filt = {0, 1},      -- off or SWEEP
-    mute_chance = {0, 0, 0.8, 0.6, 0.8, 0.9},  -- mostly muted except kick/snare
+-- phase config builder: {energy, timbre_int, pat_int, filt_int, prefer_timbre, prefer_pat, prefer_filt, mute_chance, bars}
+local function pc(e, ti, pi, fi, pt, pp, pf, mc, bars)
+  return { energy=e, timbre_int=ti, pat_int=pi, filt_int=fi,
+    prefer_timbre=pt, prefer_pat=pp, prefer_filt=pf, mute_chance=mc, bars=bars }
+end
+
+-- === MINDSET CONFIGS ===
+-- Each mindset defines its own phase sequence, pacing, and personality
+
+local MINDSET_CONFIGS = {
+  -- 1: JOURNEY — classic arc: intro > groove > build > peak > break > climax > dissolve
+  -- like a DJ set. long arcs, dramatic peaks and valleys
+  {
+    name = "JOURNEY",
+    phases = {
+      pc({0.1,0.3},{0.1,0.3},{0,0.2},{0.1,0.2}, {1,5},{0,1},{0,1}, {0,0,0.8,0.6,0.8,0.9}, 3),
+      pc({0.4,0.6},{0.2,0.5},{0.1,0.3},{0.1,0.3}, {6,7,8},{0,2},{0,3}, {0,0,0,0.1,0.2,0.3}, 6),
+      pc({0.5,0.8},{0.3,0.7},{0.3,0.6},{0.2,0.5}, {2,3,8},{1,3},{1,3}, {0,0,0,0,0,0.1}, 4),
+      pc({0.8,1.0},{0.5,0.9},{0.4,0.7},{0.3,0.6}, {4,10,6},{4,5},{1,4}, {0,0,0,0,0,0}, 4),
+      pc({0.1,0.3},{0.1,0.3},{0,0.1},{0.2,0.5}, {5,9},{0},{2,4}, {0,0.5,0.7,0.8,0.3,0.9}, 2),
+      pc({0.9,1.0},{0.6,1.0},{0.5,0.8},{0.4,0.7}, {4,10},{4,5},{1,3}, {0,0,0,0,0,0}, 4),
+      pc({0.2,0.4},{0.1,0.4},{0.1,0.2},{0.1,0.3}, {5,3},{1},{1}, {0,0.2,0.3,0.4,0.3,0.5}, 3),
+    },
+    harmony_moves = true,    -- modulate keys on builds
+    contrast_freq = 0.15,    -- how often contrast moments happen
+    sync_interval = {4, 8},  -- bars between sync pulses
   },
-  -- GROOVE: settled rhythm, all voices in, moderate energy
-  { energy = {0.4, 0.6}, timbre_int = {0.2, 0.5}, pat_int = {0.1, 0.3}, filt_int = {0.1, 0.3},
-    prefer_timbre = {6, 7, 8},  -- per-hit styles (MUTATE, SCATTER, RATCHET)
-    prefer_pat = {0, 2},        -- off or SHIFTER
-    prefer_filt = {0, 3},       -- off or RESONATE
-    mute_chance = {0, 0, 0, 0.1, 0.2, 0.3},
+
+  -- 2: MANTRA — hypnotic repetition with slow evolution
+  -- stays in grooves for a LONG time, changes are subtle and rare
+  -- like Fela Kuti or Steve Reich — the repetition IS the music
+  {
+    name = "MANTRA",
+    phases = {
+      pc({0.3,0.5},{0.1,0.3},{0,0.1},{0,0.1}, {5,9},{0},{0}, {0,0,0,0.3,0.3,0.5}, 8),    -- settle
+      pc({0.4,0.6},{0.2,0.4},{0.1,0.2},{0.1,0.2}, {5,8,9},{0,2},{0,3}, {0,0,0,0,0,0.2}, 12),  -- long groove
+      pc({0.5,0.7},{0.3,0.5},{0.1,0.3},{0.1,0.3}, {3,5},{1},{1}, {0,0,0,0,0,0}, 6),       -- subtle build
+      pc({0.6,0.8},{0.3,0.6},{0.2,0.4},{0.2,0.4}, {6,7},{3},{3}, {0,0,0,0,0,0}, 8),       -- plateau
+      pc({0.3,0.5},{0.1,0.3},{0,0.1},{0.1,0.2}, {5,9},{0},{0,1}, {0,0,0.2,0.3,0.1,0.4}, 4), -- thin
+      pc({0.5,0.7},{0.2,0.5},{0.1,0.3},{0.1,0.3}, {8,9},{2},{3}, {0,0,0,0,0,0}, 10),      -- rebuild
+      pc({0.3,0.5},{0.1,0.3},{0,0.1},{0,0.1}, {5},{0},{0}, {0,0,0.1,0.2,0.2,0.4}, 6),     -- return
+    },
+    harmony_moves = false,   -- stays in one key (mantra)
+    contrast_freq = 0.05,    -- rare contrast (consistency)
+    sync_interval = {8, 16}, -- very rare sync (hypnotic)
   },
-  -- BUILD: rising energy, increasing density and movement
-  { energy = {0.5, 0.8}, timbre_int = {0.3, 0.7}, pat_int = {0.3, 0.6}, filt_int = {0.2, 0.5},
-    prefer_timbre = {2, 3, 8},  -- PUNCH, MORPH, RATCHET
-    prefer_pat = {1, 3},        -- BUILDER, POLY
-    prefer_filt = {1, 3},       -- SWEEP, RESONATE
-    mute_chance = {0, 0, 0, 0, 0, 0.1},
+
+  -- 3: JAZZ — conversational. short sections, call+response,
+  -- voices solo and trade, harmony moves freely
+  {
+    name = "JAZZ",
+    phases = {
+      pc({0.3,0.5},{0.2,0.4},{0.1,0.2},{0.1,0.2}, {6,9},{0,2},{0}, {0,0,0,0.1,0,0.2}, 2),  -- head in
+      pc({0.5,0.7},{0.3,0.6},{0.2,0.4},{0.1,0.3}, {6,7,9},{2},{3,4}, {0,0,0,0,0,0}, 3),     -- comping
+      pc({0.4,0.6},{0.3,0.5},{0.1,0.2},{0.3,0.6}, {9,6},{0},{4}, {0,0.3,0.3,0,0,0.5}, 2),   -- solo 1
+      pc({0.5,0.7},{0.4,0.7},{0.2,0.4},{0.2,0.4}, {7,8},{2,4},{3}, {0,0,0,0.3,0,0.3}, 2),   -- trading
+      pc({0.4,0.6},{0.3,0.5},{0.1,0.2},{0.3,0.6}, {6,9},{0},{4}, {0.3,0,0.3,0.3,0,0.5}, 2), -- solo 2
+      pc({0.7,0.9},{0.5,0.8},{0.3,0.6},{0.2,0.5}, {4,6,7},{4,3},{1,3}, {0,0,0,0,0,0}, 3),   -- collective
+      pc({0.3,0.5},{0.2,0.4},{0.1,0.2},{0.1,0.2}, {5,9},{0},{0}, {0,0,0,0.1,0,0.2}, 2),     -- head out
+    },
+    harmony_moves = true,
+    contrast_freq = 0.3,     -- lots of contrast (solos!)
+    sync_interval = {2, 4},  -- frequent sync (conversation)
   },
-  -- PEAK: maximum energy, everything firing, fills
-  { energy = {0.8, 1.0}, timbre_int = {0.5, 0.9}, pat_int = {0.4, 0.7}, filt_int = {0.3, 0.6},
-    prefer_timbre = {4, 10, 6}, -- GLITCH, SWAP, MUTATE
-    prefer_pat = {4, 5},        -- BREAK, CONDUCTOR
-    prefer_filt = {1, 4},       -- SWEEP, ISOLATE
-    mute_chance = {0, 0, 0, 0, 0, 0},
+
+  -- 4: TECHNO — relentless. kick never stops, energy stays high,
+  -- changes happen through filters and FX, not pattern changes
+  -- like a Berlin set: hypnotic but always moving forward
+  {
+    name = "TECHNO",
+    phases = {
+      pc({0.5,0.7},{0.2,0.4},{0,0.1},{0.2,0.5}, {1,2},{0},{1,2}, {0,0.5,0,0.3,0.5,0.7}, 4), -- filter intro
+      pc({0.6,0.8},{0.3,0.6},{0.1,0.2},{0.3,0.6}, {2,8},{0,3},{1,3}, {0,0,0,0,0,0.3}, 6),    -- driving
+      pc({0.7,0.9},{0.4,0.7},{0.2,0.4},{0.4,0.7}, {2,4,8},{3,4},{1,3}, {0,0,0,0,0,0}, 4),    -- intense
+      pc({0.9,1.0},{0.5,0.9},{0.3,0.5},{0.5,0.8}, {4,10},{4},{1}, {0,0,0,0,0,0}, 4),         -- peak
+      pc({0.4,0.6},{0.2,0.4},{0,0},{0.4,0.7}, {1,5},{0},{2,4}, {0,0.8,0.5,0.8,0.8,0.8}, 2),  -- breakdown (kick stays)
+      pc({0.8,1.0},{0.5,0.9},{0.3,0.5},{0.4,0.7}, {2,4,8},{3,4},{1,3}, {0,0,0,0,0,0}, 6),    -- rebuild
+      pc({0.6,0.8},{0.3,0.5},{0.1,0.2},{0.3,0.6}, {1,3},{0,1},{1}, {0,0,0,0.2,0.3,0.4}, 4),  -- cruise
+    },
+    harmony_moves = false,   -- stays in key (techno doesn't modulate much)
+    contrast_freq = 0.1,     -- some contrast through filter spotlight
+    sync_interval = {4, 8},
   },
-  -- BREAK: sudden drop, strip back, tension
-  { energy = {0.1, 0.3}, timbre_int = {0.1, 0.3}, pat_int = {0, 0.1}, filt_int = {0.2, 0.5},
-    prefer_timbre = {5, 9},     -- BREATHE, DIALECT
-    prefer_pat = {0},           -- off (let patterns breathe)
-    prefer_filt = {2, 4},       -- STROBE, ISOLATE
-    mute_chance = {0, 0.5, 0.7, 0.8, 0.3, 0.9},  -- mostly stripped, keep tone
-  },
-  -- CLIMAX: rebuild fast, hit harder than PEAK
-  { energy = {0.9, 1.0}, timbre_int = {0.6, 1.0}, pat_int = {0.5, 0.8}, filt_int = {0.4, 0.7},
-    prefer_timbre = {4, 10},    -- GLITCH, SWAP
-    prefer_pat = {4, 5},        -- BREAK, CONDUCTOR
-    prefer_filt = {1, 3},       -- SWEEP, RESONATE
-    mute_chance = {0, 0, 0, 0, 0, 0},
-  },
-  -- DISSOLVE: wind down, fade complexity, return toward intro
-  { energy = {0.2, 0.4}, timbre_int = {0.1, 0.4}, pat_int = {0.1, 0.2}, filt_int = {0.1, 0.3},
-    prefer_timbre = {5, 3},     -- BREATHE, MORPH
-    prefer_pat = {1},           -- BUILDER (removing)
-    prefer_filt = {1},          -- SWEEP (closing)
-    mute_chance = {0, 0.2, 0.3, 0.4, 0.3, 0.5},
+
+  -- 5: AMBIENT — barely there. ultra-minimal, voices appear and disappear
+  -- like ghosts. long silences, occasional events, deep patience
+  -- like Brian Eno's generative installations
+  {
+    name = "AMBIENT",
+    phases = {
+      pc({0.05,0.15},{0.1,0.2},{0,0},{0,0.1}, {5},{0},{0}, {0.3,0.7,0.8,0.5,0.3,0.8}, 6),   -- near silence
+      pc({0.1,0.25},{0.1,0.3},{0,0.1},{0,0.1}, {5,3},{0},{0,1}, {0.2,0.5,0.6,0.3,0.2,0.6}, 8), -- emerging
+      pc({0.2,0.4},{0.2,0.4},{0.1,0.2},{0.1,0.2}, {3,5,9},{1},{1}, {0,0.3,0.4,0.1,0,0.3}, 6), -- present
+      pc({0.3,0.5},{0.2,0.5},{0.1,0.2},{0.1,0.3}, {5,6,9},{0,2},{0,3}, {0,0.2,0.2,0,0,0.2}, 8), -- full
+      pc({0.1,0.2},{0.1,0.2},{0,0},{0.1,0.2}, {5},{0},{4}, {0.1,0.6,0.7,0.5,0.2,0.7}, 4),    -- fading
+      pc({0.2,0.4},{0.2,0.4},{0.1,0.2},{0.1,0.2}, {3,9},{1},{1}, {0,0.3,0.3,0.1,0,0.3}, 6),  -- echo
+      pc({0.05,0.15},{0.1,0.2},{0,0},{0,0.1}, {5},{0},{0}, {0.3,0.7,0.8,0.6,0.4,0.8}, 8),    -- dissolve to silence
+    },
+    harmony_moves = true,    -- slow harmonic drift (atmospheric)
+    contrast_freq = 0.03,    -- very rare (patience)
+    sync_interval = {12, 24}, -- almost never (each voice is independent)
   },
 }
 
@@ -1339,6 +1390,8 @@ local function bandleader_step(step_num)
   if not bandleader.active then return end
   bandleader.step_count = bandleader.step_count + 1
 
+  local mind = MINDSET_CONFIGS[bandleader.mindset] or MINDSET_CONFIGS[1]
+  local num_phases = #mind.phases
   local bar_pos = step_num % 16
   local beat = step_num % 4
 
@@ -1349,16 +1402,14 @@ local function bandleader_step(step_num)
 
     -- time to transition?
     if bandleader.phase_bars >= bandleader.phase_length then
-      -- advance phase
-      bandleader.phase = (bandleader.phase % #BANDLEADER_PHASES) + 1
+      -- advance phase (wrap within this mindset's phase count)
+      bandleader.phase = (bandleader.phase % num_phases) + 1
       bandleader.phase_bars = 0
-      -- each phase has a different natural length
-      local phase_lengths = {3, 6, 4, 4, 2, 4, 3}  -- bars
-      bandleader.phase_length = phase_lengths[bandleader.phase] + math.random(-1, 1)
-      bandleader.phase_length = math.max(2, bandleader.phase_length)
 
-      -- set target energy for new phase
-      local cfg = PHASE_CONFIG[bandleader.phase]
+      local cfg = mind.phases[bandleader.phase]
+      bandleader.phase_length = cfg.bars + math.random(-1, 1)
+      bandleader.phase_length = math.max(1, bandleader.phase_length)
+
       bandleader.target_energy = randf(cfg.energy[1], cfg.energy[2])
 
       -- === PHASE TRANSITION: tell engineers what to do ===
@@ -1399,10 +1450,10 @@ local function bandleader_step(step_num)
   -- === ENERGY SLEW: smooth transitions ===
   bandleader.energy = bandleader.energy + (bandleader.target_energy - bandleader.energy) * 0.02
 
-  -- === SYNC PULSES: every 4-8 bars, create a sync moment ===
-  -- all engineers briefly align their actions
+  -- === SYNC PULSES ===
   bandleader.sync_pulse = false
-  if bar_pos == 0 and bandleader.bar_count % math.random(4, 8) == 0 then
+  local si = mind.sync_interval
+  if bar_pos == 0 and bandleader.bar_count % math.random(si[1], si[2]) == 0 then
     bandleader.sync_pulse = true
     -- sync moment: bump all intensities briefly
     local bump = 0.2 * bandleader.energy
@@ -1414,7 +1465,7 @@ local function bandleader_step(step_num)
   -- === CONTRAST: feature one engineer while others rest ===
   bandleader.contrast_timer = bandleader.contrast_timer - 1
   if bandleader.contrast_timer <= 0 then
-    if math.random() < 0.15 * bandleader.energy then
+    if math.random() < mind.contrast_freq * bandleader.energy then
       -- start a contrast moment: one engineer gets boosted, others dim
       bandleader.contrast_voice = math.random(1, 3)
       bandleader.contrast_timer = math.random(8, 24)  -- steps
@@ -1449,16 +1500,16 @@ local function bandleader_step(step_num)
     end)
   end
 
-  -- === HARMONIC JOURNEY: shift harmony with energy ===
-  if bar_pos == 0 and bandleader.phase_bars == 0 then
-    -- on phase transitions, consider shifting harmony
-    if bandleader.phase == 3 or bandleader.phase == 6 then
-      -- BUILD and CLIMAX: move up in circle of fifths (tension)
-      harmony.root = (harmony.root + 7) % 12  -- up a fifth
+  -- === HARMONIC JOURNEY ===
+  if mind.harmony_moves and bar_pos == 0 and bandleader.phase_bars == 0 then
+    -- on phase transitions: move through circle of fifths
+    if bandleader.energy > 0.6 then
+      -- high energy: move up a fifth (tension)
+      harmony.root = (harmony.root + 7) % 12
       params:set("root", harmony.root, true)
-    elseif bandleader.phase == 7 then
-      -- DISSOLVE: return toward original key
-      harmony.root = (harmony.root + 5) % 12  -- down a fifth (= up a fourth)
+    elseif bandleader.energy < 0.3 then
+      -- low energy: return down a fifth
+      harmony.root = (harmony.root + 5) % 12
       params:set("root", harmony.root, true)
     end
 
@@ -1477,7 +1528,7 @@ local function bandleader_step(step_num)
   end
 
   -- === INTENSITY DRIFT: gradual within-phase adjustments ===
-  local cfg = PHASE_CONFIG[bandleader.phase]
+  local cfg = mind.phases[bandleader.phase]
   -- gently nudge intensities toward phase targets
   local t_target = randf(cfg.timbre_int[1], cfg.timbre_int[2])
   local p_target = randf(cfg.pat_int[1], cfg.pat_int[2])
@@ -1871,8 +1922,18 @@ local function build_params()
 
   -- bandleader
   params:add_separator("BANDLEADER")
-  params:add_option("bandleader", "bandleader", {"off", "on"}, 1)
-  params:set_action("bandleader", function(v) bandleader.active = v == 2 end)
+  params:add_option("bandleader", "bandleader", BANDLEADER_STYLES, 1)
+  params:set_action("bandleader", function(v)
+    if v == 1 then
+      bandleader.active = false
+    else
+      bandleader.active = true
+      bandleader.mindset = v - 1
+      bandleader.phase = 1
+      bandleader.phase_bars = 0
+      bandleader.bar_count = 0
+    end
+  end)
 
   -- pattern engineer
   params:add_separator("PATTERN ENGINEER")
@@ -1999,13 +2060,18 @@ local function draw_main()
 
   -- bandleader phase or engineer indicators
   if bandleader.active then
-    screen.level(12)
+    local mind = MINDSET_CONFIGS[bandleader.mindset]
+    -- mindset name (dim) + phase name (bright)
+    screen.level(5)
     screen.move(64, 7)
-    local phase_short = string.sub(BANDLEADER_PHASES[bandleader.phase], 1, 5)
-    screen.text(phase_short)
+    screen.text(string.sub(mind.name, 1, 3))
+    screen.level(12)
+    screen.move(84, 7)
+    local phase_idx = math.min(bandleader.phase, #BANDLEADER_PHASES)
+    screen.text(string.sub(BANDLEADER_PHASES[phase_idx], 1, 4))
     -- energy bar
     screen.level(math.floor(bandleader.energy * 12) + 2)
-    screen.rect(108, 2, math.floor(bandleader.energy * 18), 3)
+    screen.rect(110, 2, math.floor(bandleader.energy * 16), 3)
     screen.fill()
   else
     local eng_x = 74
