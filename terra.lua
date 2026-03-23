@@ -13,7 +13,15 @@
 -- K3: generate pattern
 -- K2+K3: toggle drift
 --
--- v1.0 @jamminstein
+-- grid layout (128):
+-- rows 1-6: step sequencer
+-- row 7: track select + mute
+-- row 8: transport + modes
+--
+-- hold grid step + turn E3:
+--   adjust velocity
+--
+-- v1.1 @jamminstein
 
 engine.name = "Terra"
 
@@ -28,11 +36,13 @@ local NUM_FX_SLOTS = 3
 -- pages: 1=main, 2=pattern, 3=fx, 4=harmony
 local page = 1
 local selected_track = 1
+local selected_fx_slot = 1
 local playing = false
 local step = 1
 local drift_mode = false
 local react_mode = false
 local k2_held = false
+local swing_amt = 0  -- 0-100, 50=triplet swing
 
 -- clock
 local clock_id = nil
@@ -41,6 +51,14 @@ local tick_count = 0
 -- grid
 local g = grid.connect()
 local grid_connected = false
+local grid_held = {}  -- {x=, y=, time=} for hold detection
+local grid_page = 1   -- 1=sequencer, 2=velocity
+local mutes = {false, false, false, false, false, false}
+local flash = {}      -- {track, step, brightness} for trigger flash
+for i = 1, NUM_VOICES do flash[i] = 0 end
+
+-- pattern clipboard
+local clipboard = nil  -- {pattern, prob, vel}
 
 -- midi
 local midi_out = nil
@@ -54,16 +72,15 @@ local MODE_NAMES = {"FM", "SUB", "NOISE"}
 
 -- fx type names
 local FX_NAMES = {"bypass", "delay", "reverb", "filter", "crush", "ring", "chorus", "phaser"}
--- fx parameter names per type: {param1_name, param2_name}
 local FX_PARAMS = {
-  {"--", "--"},           -- bypass
-  {"time", "feedback"},   -- delay
-  {"size", "shimmer"},    -- reverb
-  {"freq", "lfo rate"},   -- filter
-  {"bits", "drive"},      -- crush
-  {"freq", "depth"},      -- ring
-  {"rate", "depth"},      -- chorus
-  {"rate", "depth"},      -- phaser
+  {"--", "--"},
+  {"time", "feedback"},
+  {"size", "shimmer"},
+  {"freq", "lfo rate"},
+  {"bits", "drive"},
+  {"freq", "depth"},
+  {"rate", "depth"},
+  {"rate", "depth"},
 }
 
 -- circle of fifths order (note indices 0-11)
@@ -71,46 +88,29 @@ local CIRCLE_OF_FIFTHS = {0, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10, 5}
 local NOTE_NAMES_SHARP = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
 
 -- ============ VOICE CONFIG ============
--- per-voice defaults
 local voices = {}
 for i = 1, NUM_VOICES do
   voices[i] = {
-    mode = 0,          -- 0=FM, 1=Sub, 2=Noise
-    base_freq = 60,    -- MIDI note
-    decay = 0.3,
-    filter_freq = 4000,
-    filter_res = 0.3,
-    filter_type = 0,   -- 0=LP, 1=HP, 2=BP
-    pitch_env = 2,
-    pitch_decay = 0.05,
-    pan = 0,
-    spread = 0.3,
-    detune = 0,
-    amp = 0.8,
-    midi_note = 36 + (i - 1) * 4,  -- GM-ish mapping
-    midi_ch = 10,
+    mode = 0, base_freq = 60, decay = 0.3,
+    filter_freq = 4000, filter_res = 0.3, filter_type = 0,
+    pitch_env = 2, pitch_decay = 0.05,
+    pan = 0, spread = 0.3, detune = 0, amp = 0.8,
+    midi_note = 36 + (i - 1) * 4, midi_ch = 10,
   }
 end
 
--- default voice presets
 local function init_voice_presets()
-  -- kick: subtractive, sine, big pitch sweep
   voices[1].mode = 1; voices[1].base_freq = 48; voices[1].decay = 0.4
   voices[1].pitch_env = 8; voices[1].pitch_decay = 0.04; voices[1].filter_freq = 2000
   voices[1].pan = 0; voices[1].amp = 0.9
-  -- snare: noise + sub
   voices[2].mode = 2; voices[2].base_freq = 72; voices[2].decay = 0.2
   voices[2].filter_freq = 5000; voices[2].filter_res = 0.4; voices[2].pan = -0.1
-  -- hat: noise, high filter, short
   voices[3].mode = 2; voices[3].base_freq = 100; voices[3].decay = 0.08
   voices[3].filter_freq = 8000; voices[3].filter_type = 1; voices[3].pan = 0.2
-  -- perc: FM metallic
   voices[4].mode = 0; voices[4].base_freq = 64; voices[4].decay = 0.15
   voices[4].filter_freq = 6000; voices[4].pan = -0.3
-  -- tone: FM bell-like
   voices[5].mode = 0; voices[5].base_freq = 72; voices[5].decay = 0.5
   voices[5].filter_freq = 8000; voices[5].pan = 0.3; voices[5].spread = 0.5
-  -- fx hit: noise textured
   voices[6].mode = 2; voices[6].base_freq = 55; voices[6].decay = 0.35
   voices[6].filter_freq = 3000; voices[6].filter_res = 0.7; voices[6].pan = 0.4
 end
@@ -120,22 +120,17 @@ end
 local seq = {}
 for i = 1, NUM_VOICES do
   seq[i] = {
-    pattern = {},      -- 1/0 for each step
-    prob = {},         -- 0-100 probability per step
-    euclid_k = 0,     -- euclidean pulses (0 = manual)
-    euclid_offset = 0,
-    accent = {},       -- accent pattern
-    vel = {},          -- velocity per step (0.0-1.0)
+    pattern = {}, prob = {}, vel = {},
+    euclid_k = 0, euclid_offset = 0,
+    track_prob = 100,  -- global probability for the track (robot-controllable)
   }
   for s = 1, NUM_STEPS do
     seq[i].pattern[s] = 0
     seq[i].prob[s] = 100
-    seq[i].accent[s] = 0
     seq[i].vel[s] = 0.8
   end
 end
 
--- euclidean rhythm generator (bjorklund)
 local function euclidean(steps, pulses, offset)
   local pattern = {}
   for i = 1, steps do pattern[i] = 0 end
@@ -144,7 +139,6 @@ local function euclidean(steps, pulses, offset)
     return pattern
   end
   if pulses <= 0 then return pattern end
-
   local bucket = 0
   for i = 1, steps do
     bucket = bucket + pulses
@@ -153,8 +147,6 @@ local function euclidean(steps, pulses, offset)
       pattern[i] = 1
     end
   end
-
-  -- apply offset
   if offset > 0 then
     local rotated = {}
     for i = 1, steps do
@@ -174,26 +166,42 @@ local function apply_euclidean(track)
   end
 end
 
--- generate random pattern for a track
 local function generate_pattern(track)
   local density = math.random(20, 70) / 100
   for s = 1, NUM_STEPS do
     seq[track].pattern[s] = math.random() < density and 1 or 0
     seq[track].prob[s] = math.random(60, 100)
-    seq[track].vel[s] = 0.5 + math.random() * 0.5
+    seq[track].vel[s] = 0.4 + math.random() * 0.6
   end
+end
+
+local function copy_pattern(track)
+  clipboard = {
+    pattern = {table.unpack(seq[track].pattern)},
+    prob = {table.unpack(seq[track].prob)},
+    vel = {table.unpack(seq[track].vel)},
+    euclid_k = seq[track].euclid_k,
+    euclid_offset = seq[track].euclid_offset,
+  }
+end
+
+local function paste_pattern(track)
+  if not clipboard then return end
+  for s = 1, NUM_STEPS do
+    seq[track].pattern[s] = clipboard.pattern[s]
+    seq[track].prob[s] = clipboard.prob[s]
+    seq[track].vel[s] = clipboard.vel[s]
+  end
+  seq[track].euclid_k = clipboard.euclid_k
+  seq[track].euclid_offset = clipboard.euclid_offset
 end
 
 -- ============ HARMONIC SYSTEM (Nymira-inspired) ============
 
 local harmony = {
-  root = 0,           -- 0-11 (C=0)
-  scale_type = 1,     -- index into musicutil scale list
-  chord_mode = false,  -- tune voices to chord tones
-  chord_type = 1,     -- 1=major, 2=minor, 3=dim
-  drift_rate = 0,     -- 0=off, 1-5 speed of key drift
-  drift_counter = 0,
-  circle_pos = 1,     -- position in circle of fifths
+  root = 0, scale_type = 1,
+  chord_mode = false, chord_type = 1,
+  drift_rate = 0, drift_counter = 0, circle_pos = 1,
 }
 
 local SCALE_NAMES = {}
@@ -213,31 +221,23 @@ local function snap_to_scale(midi_note)
 end
 
 local function get_chord_notes()
-  local chord_names = {"major", "minor", "diminished"}
-  local name = chord_names[harmony.chord_type] or "major"
-  -- build chord from root
-  local root_midi = harmony.root + 48
-  -- simple triad intervals
   local intervals = {
-    major = {0, 4, 7},
-    minor = {0, 3, 7},
-    diminished = {0, 3, 6},
+    {0, 4, 7},     -- major
+    {0, 3, 7},     -- minor
+    {0, 3, 6},     -- dim
   }
-  local ivs = intervals[name]
+  local ivs = intervals[harmony.chord_type] or intervals[1]
+  local root_midi = harmony.root + 48
   local notes = {}
-  for i, iv in ipairs(ivs) do
-    notes[i] = root_midi + iv
-  end
+  for i, iv in ipairs(ivs) do notes[i] = root_midi + iv end
   return notes
 end
 
--- harmonic drift: move through circle of fifths
 local function harmonic_drift_step()
   if harmony.drift_rate > 0 then
     harmony.drift_counter = harmony.drift_counter + 1
     if harmony.drift_counter >= (6 - harmony.drift_rate) * 8 then
       harmony.drift_counter = 0
-      -- move one step in circle of fifths
       harmony.circle_pos = (harmony.circle_pos % 12) + 1
       harmony.root = CIRCLE_OF_FIFTHS[harmony.circle_pos]
     end
@@ -249,11 +249,8 @@ end
 local function drift_step()
   if not drift_mode then return end
   tick_count = tick_count + 1
-
-  -- every 4 bars, slightly mutate patterns
   if tick_count % (NUM_STEPS * 4) == 0 then
     for t = 1, NUM_VOICES do
-      -- randomly flip 1-2 steps
       local flips = math.random(1, 2)
       for _ = 1, flips do
         local s = math.random(1, NUM_STEPS)
@@ -261,14 +258,11 @@ local function drift_step()
           seq[t].pattern[s] = 1 - seq[t].pattern[s]
         end
       end
-      -- nudge probabilities
       for s = 1, NUM_STEPS do
         seq[t].prob[s] = util.clamp(seq[t].prob[s] + math.random(-5, 5), 30, 100)
       end
     end
   end
-
-  -- harmonic drift
   harmonic_drift_step()
 end
 
@@ -279,23 +273,172 @@ for i = 1, NUM_VOICES do recent_density[i] = 0 end
 
 local function react_adjust()
   if not react_mode then return end
-  -- count how many voices fired this step
   local total = 0
-  for t = 1, NUM_VOICES do
-    total = total + recent_density[t]
-  end
-  -- if dense moment, increase probability of sparse tracks (contrast)
-  -- if sparse moment, let things breathe
+  for t = 1, NUM_VOICES do total = total + recent_density[t] end
   for t = 1, NUM_VOICES do
     local next_step = (step % NUM_STEPS) + 1
     if total > 3 then
-      -- dense: reduce some probabilities for next step
       if recent_density[t] == 1 then
         seq[t].prob[next_step] = util.clamp(seq[t].prob[next_step] - 5, 30, 100)
       end
     elseif total < 2 then
-      -- sparse: boost probabilities
       seq[t].prob[next_step] = util.clamp(seq[t].prob[next_step] + 3, 30, 100)
+    end
+  end
+end
+
+-- ============ TIMBRE ENGINEER ============
+-- Algorithmically sculpts voice timbres in real-time.
+-- Styles: 1=SWEEP (slow LFO sweeps), 2=PUNCH (rhythmic stabs),
+--         3=MORPH (glacial evolution), 4=GLITCH (abrupt random),
+--         5=BREATHE (organic swell/recede)
+--
+-- Each voice has an independent timbre engineer that can be on/off.
+-- The engineer modulates: filter freq, filter res, decay, pitch env,
+-- spread, pan, and amp — always within musical bounds.
+
+local TIMBRE_STYLES = {"off", "SWEEP", "PUNCH", "MORPH", "GLITCH", "BREATHE"}
+local timbre = {
+  style = 1,         -- global style (0=off, 1-5)
+  intensity = 0.5,   -- 0-1 how much to modulate
+  phase = {},        -- per-voice phase accumulator
+  target = {},       -- per-voice target values for MORPH
+  drunk = {},        -- per-voice drunk walk state for GLITCH
+}
+for i = 1, NUM_VOICES do
+  timbre.phase[i] = math.random() * 2 * math.pi  -- randomize start phase
+  timbre.target[i] = { filter = 0, res = 0, decay = 0, spread = 0, pan = 0 }
+  timbre.drunk[i] = { filter = 0, res = 0, decay = 0, spread = 0, pan = 0 }
+end
+
+-- clamp and apply a timbral offset to a voice param
+local function apply_timbre_offset(voice_idx, param, offset, lo, hi)
+  local v = voices[voice_idx]
+  -- offset is normalized -1..1, scale to range
+  local range = hi - lo
+  local base = v[param]
+  -- don't move the actual voice table, just compute the instantaneous value
+  return util.clamp(base + offset * range * timbre.intensity, lo, hi)
+end
+
+local function timbre_engineer_step(step_num)
+  if timbre.style == 0 then return end
+
+  for t = 1, NUM_VOICES do
+    local v = voices[t]
+    local phase = timbre.phase[t]
+    local int = timbre.intensity
+
+    if timbre.style == 1 then
+      -- SWEEP: slow sinusoidal LFO sweeps on filter + decay
+      -- each voice has a different phase offset = stereo movement
+      timbre.phase[t] = phase + 0.02 + (t * 0.005)
+      local lfo = math.sin(timbre.phase[t])
+      local lfo2 = math.sin(timbre.phase[t] * 0.7 + 1.3)
+
+      v.filter_freq = util.clamp(
+        params:get("v" .. t .. "_filter") + lfo * 3000 * int,
+        60, 16000)
+      v.decay = util.clamp(
+        params:get("v" .. t .. "_decay") + lfo2 * 0.3 * int,
+        0.02, 1.5)
+      v.spread = util.clamp(
+        params:get("v" .. t .. "_spread") + math.sin(timbre.phase[t] * 0.3) * 0.4 * int,
+        0, 1)
+
+    elseif timbre.style == 2 then
+      -- PUNCH: rhythmic parameter stabs synced to steps
+      -- filter opens on downbeats, closes on upbeats
+      local is_downbeat = step_num % 4 == 1
+      local is_offbeat = step_num % 4 == 3
+      local base_filter = params:get("v" .. t .. "_filter")
+
+      if is_downbeat then
+        v.filter_freq = util.clamp(base_filter * (1 + 1.5 * int), 60, 16000)
+        v.pitch_env = params:get("v" .. t .. "_penv") * (1 + int)
+      elseif is_offbeat then
+        v.filter_freq = util.clamp(base_filter * (1 - 0.3 * int), 60, 16000)
+      else
+        v.filter_freq = base_filter
+      end
+      -- rhythmic pan (ping-pong between voices)
+      if t >= 3 then
+        local pp = (step_num % 8 < 4) and 1 or -1
+        v.pan = util.clamp(params:get("v" .. t .. "_pan") + pp * 0.3 * int, -1, 1)
+      end
+
+    elseif timbre.style == 3 then
+      -- MORPH: glacial evolution toward random targets
+      -- targets change every ~32 steps
+      if step_num % 32 == (t * 5) % 32 then
+        timbre.target[t].filter = (math.random() - 0.5) * 2
+        timbre.target[t].res = (math.random() - 0.5) * 2
+        timbre.target[t].decay = (math.random() - 0.5) * 2
+        timbre.target[t].spread = math.random()
+        timbre.target[t].pan = (math.random() - 0.5) * 2
+      end
+      -- slew toward targets
+      local tgt = timbre.target[t]
+      local slew = 0.03
+      v.filter_freq = util.clamp(
+        v.filter_freq + (params:get("v" .. t .. "_filter") + tgt.filter * 4000 * int - v.filter_freq) * slew,
+        60, 16000)
+      v.filter_res = util.clamp(
+        v.filter_res + (params:get("v" .. t .. "_res") + tgt.res * 0.3 * int - v.filter_res) * slew,
+        0.05, 0.95)
+      v.decay = util.clamp(
+        v.decay + (params:get("v" .. t .. "_decay") + tgt.decay * 0.4 * int - v.decay) * slew,
+        0.02, 1.5)
+      v.spread = util.clamp(
+        v.spread + (tgt.spread * int - v.spread) * slew,
+        0, 1)
+
+    elseif timbre.style == 4 then
+      -- GLITCH: abrupt random changes, some steps get wild values
+      -- 15% chance per step to glitch a random parameter
+      if math.random() < 0.15 * int then
+        local which = math.random(1, 5)
+        if which == 1 then
+          v.filter_freq = util.clamp(
+            params:get("v" .. t .. "_filter") * (0.3 + math.random() * 2.5),
+            60, 16000)
+        elseif which == 2 then
+          v.decay = util.clamp(math.random() * 0.8 + 0.02, 0.02, 1.5)
+        elseif which == 3 then
+          v.filter_res = util.clamp(math.random() * 0.8 + 0.05, 0.05, 0.95)
+        elseif which == 4 then
+          v.pitch_env = math.random() * 10 * int
+        elseif which == 5 then
+          v.pan = util.clamp((math.random() - 0.5) * 2 * int, -1, 1)
+        end
+      else
+        -- snap back toward base values (partial recovery)
+        v.filter_freq = v.filter_freq + (params:get("v" .. t .. "_filter") - v.filter_freq) * 0.2
+        v.decay = v.decay + (params:get("v" .. t .. "_decay") - v.decay) * 0.2
+      end
+
+    elseif timbre.style == 5 then
+      -- BREATHE: organic swell and recede, like a living instrument
+      -- uses combined sine waves at different rates for organic movement
+      timbre.phase[t] = phase + 0.008 + (t * 0.003)
+      local breath = math.sin(timbre.phase[t]) * 0.5 + math.sin(timbre.phase[t] * 2.3) * 0.3
+      local breath2 = math.cos(timbre.phase[t] * 0.6 + t) * 0.4
+
+      v.filter_freq = util.clamp(
+        params:get("v" .. t .. "_filter") * (1 + breath * int),
+        60, 16000)
+      v.decay = util.clamp(
+        params:get("v" .. t .. "_decay") * (1 + breath2 * 0.5 * int),
+        0.02, 1.5)
+      v.amp = util.clamp(
+        params:get("v" .. t .. "_amp") * (1 + breath * 0.2 * int),
+        0.1, 1.0)
+      v.spread = util.clamp(
+        params:get("v" .. t .. "_spread") + math.sin(timbre.phase[t] * 0.4) * 0.3 * int,
+        0, 1)
+      v.pan = util.clamp(
+        params:get("v" .. t .. "_pan") + math.sin(timbre.phase[t] * 0.5 + t * 0.8) * 0.25 * int,
+        -1, 1)
     end
   end
 end
@@ -304,11 +447,7 @@ end
 
 local fx = {}
 for i = 1, NUM_FX_SLOTS do
-  fx[i] = {
-    type = 0,    -- 0=bypass
-    param1 = 0.5,
-    param2 = 0.3,
-  }
+  fx[i] = { type = 0, param1 = 0.5, param2 = 0.3 }
 end
 
 local duck_amt = 0
@@ -319,38 +458,36 @@ local function set_fx_type(slot, fxtype)
   engine.fx_set(slot - 1, fxtype)
 end
 
--- map normalized param1/param2 to actual engine params per fx type
 local function update_fx_params(slot)
   local t = fx[slot].type
   local p1 = fx[slot].param1
   local p2 = fx[slot].param2
   local s = slot - 1
-
-  if t == 1 then -- delay
+  if t == 1 then
     engine.fx_param(s, "time", p1 * 1.5 + 0.01)
     engine.fx_param(s, "feedback", p2 * 0.85)
     engine.fx_param(s, "mix", 0.3)
-  elseif t == 2 then -- reverb
+  elseif t == 2 then
     engine.fx_param(s, "size", p1)
     engine.fx_param(s, "shimmer", p2)
     engine.fx_param(s, "mix", 0.25)
-  elseif t == 3 then -- filter
+  elseif t == 3 then
     engine.fx_param(s, "freq", util.linexp(p1, 0, 1, 80, 12000))
     engine.fx_param(s, "lfoRate", p2 * 5)
     engine.fx_param(s, "mix", 0.8)
-  elseif t == 4 then -- crush
+  elseif t == 4 then
     engine.fx_param(s, "bits", util.linlin(p1, 0, 1, 4, 16))
     engine.fx_param(s, "drive", p2)
     engine.fx_param(s, "mix", 0.5)
-  elseif t == 5 then -- ring
+  elseif t == 5 then
     engine.fx_param(s, "freq", util.linexp(p1, 0, 1, 50, 2000))
     engine.fx_param(s, "depth", p2)
     engine.fx_param(s, "mix", 0.5)
-  elseif t == 6 then -- chorus
+  elseif t == 6 then
     engine.fx_param(s, "rate", p1 * 3)
     engine.fx_param(s, "depth", p2 * 0.01)
     engine.fx_param(s, "mix", 0.4)
-  elseif t == 7 then -- phaser
+  elseif t == 7 then
     engine.fx_param(s, "rate", p1 * 2)
     engine.fx_param(s, "depth", p2)
     engine.fx_param(s, "mix", 0.5)
@@ -362,8 +499,6 @@ end
 local function trigger_voice(track, velocity)
   local v = voices[track]
   local freq = v.base_freq
-
-  -- apply harmonic system to pitched voices (4, 5, 6)
   if track >= 4 then
     if harmony.chord_mode then
       local chord = get_chord_notes()
@@ -373,42 +508,24 @@ local function trigger_voice(track, velocity)
       freq = snap_to_scale(v.base_freq)
     end
   end
-
   local hz = musicutil.note_num_to_freq(freq)
   local amp = v.amp * velocity
-
   engine.trig_full(
-    track - 1,       -- voice 0-5
-    v.mode,           -- synthesis mode
-    hz,               -- frequency
-    amp,              -- amplitude
-    v.pan,            -- pan
-    v.decay,          -- decay
-    v.filter_freq,    -- filter freq
-    v.filter_res,     -- filter res
-    v.filter_type,    -- filter type
-    v.pitch_env,      -- pitch env amount
-    v.pitch_decay,    -- pitch env decay
-    v.spread,         -- binaural spread
-    v.detune          -- detune
+    track - 1, v.mode, hz, amp, v.pan,
+    v.decay, v.filter_freq, v.filter_res, v.filter_type,
+    v.pitch_env, v.pitch_decay, v.spread, v.detune
   )
-
-  -- duck trigger on kick (track 1)
-  if track == 1 and duck_amt > 0 then
-    engine.duck_trig()
-  end
-
+  if track == 1 and duck_amt > 0 then engine.duck_trig() end
+  -- flash for grid
+  flash[track] = 8
   -- MIDI out
   if midi_out then
     midi_out:note_on(v.midi_note, math.floor(velocity * 127), v.midi_ch)
-    -- schedule note off
     clock.run(function()
       clock.sleep(v.decay * 0.5)
       midi_out:note_off(v.midi_note, 0, v.midi_ch)
     end)
   end
-
-  -- track density for react mode
   recent_density[track] = 1
 end
 
@@ -416,26 +533,21 @@ end
 
 local function advance_step()
   step = (step % NUM_STEPS) + 1
-
-  -- reset density tracking
   for t = 1, NUM_VOICES do recent_density[t] = 0 end
 
-  -- trigger voices
   for t = 1, NUM_VOICES do
-    if seq[t].pattern[step] == 1 then
-      local prob = seq[t].prob[step]
+    if not mutes[t] and seq[t].pattern[step] == 1 then
+      -- combine step probability with track probability
+      local prob = seq[t].prob[step] * seq[t].track_prob / 100
       if math.random(100) <= prob then
-        local vel = seq[t].vel[step]
-        trigger_voice(t, vel)
+        trigger_voice(t, seq[t].vel[step])
       end
     end
   end
 
-  -- drift and react
   drift_step()
   react_adjust()
-
-  -- redraw
+  timbre_engineer_step(step)
   redraw()
   grid_redraw()
 end
@@ -445,20 +557,20 @@ local function start_sequence()
   step = 0
   clock_id = clock.run(function()
     while true do
-      clock.sync(1/4) -- 16th notes
-      if playing then
-        advance_step()
+      -- swing: even steps get delayed
+      if swing_amt > 0 and step % 2 == 0 then
+        clock.sync(1/4 + (swing_amt / 100) * (1/8))
+      else
+        clock.sync(1/4)
       end
+      if playing then advance_step() end
     end
   end)
 end
 
 local function stop_sequence()
   playing = false
-  if clock_id then
-    clock.cancel(clock_id)
-    clock_id = nil
-  end
+  if clock_id then clock.cancel(clock_id); clock_id = nil end
 end
 
 -- ============ PARAMS ============
@@ -471,6 +583,10 @@ local function build_params()
   params:set_action("playing", function(v)
     if v == 2 then start_sequence() else stop_sequence() end
   end)
+
+  params:add_control("swing", "swing",
+    controlspec.new(0, 80, 'lin', 1, 0, "%"))
+  params:set_action("swing", function(v) swing_amt = v end)
 
   -- per-voice params
   for i = 1, NUM_VOICES do
@@ -519,18 +635,37 @@ local function build_params()
 
     params:add_number("v" .. i .. "_euclid", "euclidean pulses", 0, 16, 0)
     params:set_action("v" .. i .. "_euclid", function(v)
-      seq[i].euclid_k = v
-      apply_euclidean(i)
+      seq[i].euclid_k = v; apply_euclidean(i)
+    end)
+
+    -- per-track probability (robot-controllable)
+    params:add_number("v" .. i .. "_prob", "track probability", 0, 100, 100)
+    params:set_action("v" .. i .. "_prob", function(v)
+      seq[i].track_prob = v
+    end)
+
+    -- per-track mute (robot-controllable)
+    params:add_option("v" .. i .. "_mute", "mute", {"off", "on"}, 1)
+    params:set_action("v" .. i .. "_mute", function(v)
+      mutes[i] = v == 2
     end)
   end
 
   -- fx params
+  -- timbre engineer
+  params:add_separator("TIMBRE ENGINEER")
+  params:add_option("timbre_style", "style", TIMBRE_STYLES, 1)
+  params:set_action("timbre_style", function(v) timbre.style = v - 1 end)
+
+  params:add_control("timbre_intensity", "intensity",
+    controlspec.new(0, 1, 'lin', 0.01, 0.5))
+  params:set_action("timbre_intensity", function(v) timbre.intensity = v end)
+
   params:add_separator("FX CHAIN")
   for i = 1, NUM_FX_SLOTS do
     params:add_option("fx" .. i .. "_type", "fx " .. i .. " type", FX_NAMES, 1)
     params:set_action("fx" .. i .. "_type", function(v)
-      set_fx_type(i, v - 1)
-      fx[i].type = v - 1
+      set_fx_type(i, v - 1); fx[i].type = v - 1
     end)
     params:add_control("fx" .. i .. "_p1", "fx " .. i .. " param 1",
       controlspec.new(0, 1, 'lin', 0.01, 0.5))
@@ -562,7 +697,6 @@ local function build_params()
   params:add_number("root", "root note", 0, 11, 0)
   params:set_action("root", function(v)
     harmony.root = v
-    -- find circle position
     for i, n in ipairs(CIRCLE_OF_FIFTHS) do
       if n == v then harmony.circle_pos = i; break end
     end
@@ -583,80 +717,102 @@ local function build_params()
   -- midi
   params:add_separator("MIDI")
   params:add_number("midi_device", "midi device", 1, 4, 1)
-  params:set_action("midi_device", function(v)
-    midi_out = midi.connect(v)
-  end)
+  params:set_action("midi_device", function(v) midi_out = midi.connect(v) end)
 end
 
 -- ============ SCREEN ============
 
--- main view: 6 voice lanes with step indicators
 local function draw_main()
   -- header
   screen.level(15)
   screen.move(0, 7)
   screen.text("TERRA")
-  screen.level(4)
-  screen.move(64, 7)
-  screen.text(playing and "PLAY" or "STOP")
-  if drift_mode then
-    screen.move(92, 7)
-    screen.text("DRFT")
-  end
-  if react_mode then
-    screen.move(112, 7)
-    screen.text("RCT")
+  screen.level(playing and 15 or 4)
+  screen.move(40, 7)
+  screen.text(playing and string.char(9654) or "STOP") -- play triangle
+
+  local status = ""
+  if drift_mode then status = status .. " DRFT" end
+  if react_mode then status = status .. " RCT" end
+  if swing_amt > 0 then status = status .. " SW" end
+  if #status > 0 then
+    screen.level(6)
+    screen.move(74, 7)
+    screen.text(status)
   end
 
   -- voice lanes
   for t = 1, NUM_VOICES do
     local y = 10 + (t - 1) * 9
 
-    -- track name
-    screen.level(t == selected_track and 15 or 4)
+    -- track name (dim if muted)
+    screen.level(mutes[t] and 2 or (t == selected_track and 15 or 5))
     screen.move(0, y + 6)
     screen.text(VOICE_SHORT[t])
 
+    -- probability indicator
+    if seq[t].track_prob < 100 then
+      screen.level(3)
+      screen.move(12, y + 6)
+      screen.text(seq[t].track_prob)
+    end
+
     -- steps
     for s = 1, NUM_STEPS do
-      local x = 14 + (s - 1) * 7
+      local x = 16 + (s - 1) * 7
 
-      if seq[t].pattern[s] == 1 then
-        -- active step
+      if mutes[t] then
+        -- muted: dim everything
+        if seq[t].pattern[s] == 1 then
+          screen.level(2)
+          screen.rect(x, y, 5, 5)
+          screen.fill()
+        end
+      elseif seq[t].pattern[s] == 1 then
         if s == step and playing then
-          screen.level(15) -- bright when playing
+          screen.level(15)
         else
-          screen.level(math.floor(seq[t].prob[s] / 100 * 10) + 2)
+          -- brightness = velocity
+          screen.level(math.floor(seq[t].vel[s] * 10) + 2)
         end
         screen.rect(x, y, 5, 5)
         screen.fill()
+        -- probability dot (dim if < 100%)
+        if seq[t].prob[s] < 90 then
+          screen.level(1)
+          screen.pixel(x + 2, y + 2)
+          screen.fill()
+        end
       else
-        -- inactive step
         if s == step and playing then
-          screen.level(6)
+          screen.level(5)
           screen.rect(x, y, 5, 5)
           screen.stroke()
         else
           screen.level(1)
-          screen.rect(x, y, 5, 5)
-          screen.stroke()
+          screen.pixel(x + 2, y + 2)
+          screen.fill()
         end
       end
     end
   end
 end
 
--- pattern view: euclidean circle visualization
 local function draw_pattern()
   screen.level(15)
   screen.move(0, 7)
-  screen.text("PATTERN: " .. VOICE_NAMES[selected_track])
+  screen.text(VOICE_NAMES[selected_track])
   screen.level(4)
-  screen.move(90, 7)
+  screen.move(50, 7)
   screen.text(MODE_NAMES[voices[selected_track].mode + 1])
+  if mutes[selected_track] then
+    screen.level(3)
+    screen.move(80, 7)
+    screen.text("MUTE")
+  end
 
   -- euclidean circle
-  local cx, cy, r = 40, 38, 22
+  local cx, cy, r = 38, 38, 22
   for s = 1, NUM_STEPS do
     local angle = (s - 1) / NUM_STEPS * 2 * math.pi - math.pi / 2
     local px = cx + math.cos(angle) * r
@@ -668,7 +824,7 @@ local function draw_pattern()
         screen.circle(px, py, 3)
         screen.fill()
       else
-        screen.level(math.floor(seq[selected_track].prob[s] / 100 * 10) + 2)
+        screen.level(math.floor(seq[selected_track].vel[s] * 10) + 2)
         screen.circle(px, py, 2)
         screen.fill()
       end
@@ -684,28 +840,29 @@ local function draw_pattern()
     local angle = (step - 1) / NUM_STEPS * 2 * math.pi - math.pi / 2
     local lx = cx + math.cos(angle) * (r - 6)
     local ly = cy + math.sin(angle) * (r - 6)
-    screen.level(8)
+    screen.level(6)
     screen.move(cx, cy)
     screen.line(lx, ly)
     screen.stroke()
   end
 
-  -- info on right side
-  local x = 75
+  -- info
+  local x = 72
   screen.level(10)
-  screen.move(x, 18)
-  screen.text("euclid: " .. seq[selected_track].euclid_k)
-  screen.move(x, 28)
-  screen.text("offs: " .. seq[selected_track].euclid_offset)
-  screen.move(x, 38)
-  screen.text("note: " .. musicutil.note_num_to_name(voices[selected_track].base_freq, true))
-  screen.move(x, 48)
-  screen.text("decay: " .. string.format("%.2f", voices[selected_track].decay))
-  screen.move(x, 58)
-  screen.text("filt: " .. math.floor(voices[selected_track].filter_freq))
+  screen.move(x, 16)
+  screen.text("euc: " .. seq[selected_track].euclid_k)
+  screen.move(x, 25)
+  screen.text("off: " .. seq[selected_track].euclid_offset)
+  screen.move(x, 36)
+  screen.text(musicutil.note_num_to_name(voices[selected_track].base_freq, true))
+  screen.move(x, 45)
+  screen.text(string.format("%.2fs", voices[selected_track].decay))
+  screen.move(x, 54)
+  screen.text(math.floor(voices[selected_track].filter_freq) .. "hz")
+  screen.move(x, 63)
+  screen.text("prob:" .. seq[selected_track].track_prob .. "%")
 end
 
--- fx view: 3 fx slots
 local function draw_fx()
   screen.level(15)
   screen.move(0, 7)
@@ -713,45 +870,45 @@ local function draw_fx()
 
   for i = 1, NUM_FX_SLOTS do
     local y = 10 + (i - 1) * 18
-
-    -- slot header
-    screen.level(i == selected_track and 15 or 8)
+    screen.level(i == selected_fx_slot and 15 or 6)
     screen.move(0, y + 8)
-    screen.text(i .. ": " .. FX_NAMES[fx[i].type + 1])
+    screen.text(i .. ":" .. FX_NAMES[fx[i].type + 1])
 
     if fx[i].type > 0 then
       local pnames = FX_PARAMS[fx[i].type + 1]
-      -- param bars
-      screen.level(6)
-      screen.move(60, y + 4)
+      -- param 1 bar
+      screen.level(4)
+      screen.move(58, y + 4)
       screen.text(pnames[1])
-      screen.level(10)
-      screen.rect(60, y + 6, fx[i].param1 * 50, 3)
+      screen.level(i == selected_fx_slot and 12 or 6)
+      screen.rect(58, y + 6, fx[i].param1 * 52, 3)
       screen.fill()
-
-      screen.level(6)
-      screen.move(60, y + 12)
+      -- param 2 bar
+      screen.level(4)
+      screen.move(58, y + 12)
       screen.text(pnames[2])
-      screen.level(10)
-      screen.rect(60, y + 14, fx[i].param2 * 50, 3)
+      screen.level(i == selected_fx_slot and 10 or 5)
+      screen.rect(58, y + 14, fx[i].param2 * 52, 3)
       screen.fill()
     end
   end
 
-  -- duck info
-  screen.level(duck_amt > 0 and 12 or 4)
+  -- duck
+  screen.level(duck_amt > 0 and 12 or 3)
   screen.move(0, 63)
-  screen.text("DUCK: " .. string.format("%.0f%%", duck_amt * 100))
+  screen.text("DUCK " .. string.format("%.0f%%", duck_amt * 100))
+  if duck_amt > 0 then
+    screen.rect(50, 58, duck_amt * 60, 4)
+    screen.fill()
+  end
 end
 
--- harmony view: circle of fifths
 local function draw_harmony()
   screen.level(15)
   screen.move(0, 7)
   screen.text("HARMONY")
 
-  -- circle of fifths
-  local cx, cy, r = 40, 38, 22
+  local cx, cy, r = 38, 38, 22
 
   for i = 1, 12 do
     local angle = (i - 1) / 12 * 2 * math.pi - math.pi / 2
@@ -760,22 +917,18 @@ local function draw_harmony()
     local note_idx = CIRCLE_OF_FIFTHS[i]
 
     if note_idx == harmony.root then
-      -- current root: bright filled circle
       screen.level(15)
       screen.circle(px, py, 5)
       screen.fill()
-      -- note name in black (draw dark text on bright circle)
       screen.level(0)
       screen.move(px - 3, py + 2)
       screen.text(NOTE_NAMES_SHARP[note_idx + 1])
     else
-      -- check if in current scale
       local in_scale = false
       local scale_notes = get_scale_notes()
       for _, sn in ipairs(scale_notes) do
         if sn % 12 == note_idx then in_scale = true; break end
       end
-
       if in_scale then
         screen.level(8)
         screen.circle(px, py, 3)
@@ -785,42 +938,45 @@ local function draw_harmony()
         screen.circle(px, py, 2)
         screen.stroke()
       end
-      screen.level(in_scale and 8 or 3)
-      -- label outside circle
       local lx = cx + math.cos(angle) * (r + 8)
       local ly = cy + math.sin(angle) * (r + 8)
+      screen.level(in_scale and 8 or 3)
       screen.move(lx - 2, ly + 2)
       screen.text(NOTE_NAMES_SHARP[note_idx + 1])
     end
   end
 
-  -- info on right
-  local x = 75
+  local x = 72
   screen.level(12)
-  screen.move(x, 18)
-  screen.text("root: " .. NOTE_NAMES_SHARP[harmony.root + 1])
-  screen.move(x, 28)
-  screen.text(SCALE_NAMES[harmony.scale_type])
-  screen.move(x, 40)
+  screen.move(x, 16)
+  screen.text(NOTE_NAMES_SHARP[harmony.root + 1])
+  screen.move(x, 26)
+  screen.level(8)
+  -- truncate scale name to fit
+  local sname = SCALE_NAMES[harmony.scale_type]
+  if #sname > 10 then sname = string.sub(sname, 1, 9) .. "." end
+  screen.text(sname)
+  screen.move(x, 38)
+  screen.level(harmony.chord_mode and 15 or 4)
   screen.text(harmony.chord_mode and "CHORD" or "scale")
   if harmony.chord_mode then
-    screen.move(x, 50)
+    screen.move(x, 48)
+    screen.level(12)
     local ct = {"MAJ", "MIN", "DIM"}
     screen.text(ct[harmony.chord_type])
   end
   screen.move(x, 60)
-  screen.text("drift: " .. harmony.drift_rate)
+  screen.level(harmony.drift_rate > 0 and 10 or 4)
+  screen.text("drift:" .. harmony.drift_rate)
 end
 
 function redraw()
   screen.clear()
-
   if page == 1 then draw_main()
   elseif page == 2 then draw_pattern()
   elseif page == 3 then draw_fx()
   elseif page == 4 then draw_harmony()
   end
-
   screen.update()
 end
 
@@ -828,54 +984,49 @@ end
 
 function enc(n, d)
   if n == 1 then
-    -- page select
     page = util.clamp(page + d, 1, 4)
-
   elseif page == 1 then
-    -- main view
     if n == 2 then
       selected_track = util.clamp(selected_track + d, 1, NUM_VOICES)
     elseif n == 3 then
-      -- adjust euclidean pulses for selected track
-      seq[selected_track].euclid_k = util.clamp(seq[selected_track].euclid_k + d, 0, NUM_STEPS)
-      apply_euclidean(selected_track)
+      -- check if any grid step held: adjust its velocity
+      local held_step = nil
+      for key, h in pairs(grid_held) do
+        if h.y >= 1 and h.y <= 6 then held_step = h; break end
+      end
+      if held_step then
+        local t = held_step.y
+        local s = held_step.x
+        seq[t].vel[s] = util.clamp(seq[t].vel[s] + d * 0.05, 0.1, 1.0)
+      else
+        seq[selected_track].euclid_k = util.clamp(seq[selected_track].euclid_k + d, 0, NUM_STEPS)
+        apply_euclidean(selected_track)
+      end
     end
-
   elseif page == 2 then
-    -- pattern view
     if n == 2 then
       selected_track = util.clamp(selected_track + d, 1, NUM_VOICES)
     elseif n == 3 then
-      -- adjust offset
       seq[selected_track].euclid_offset = (seq[selected_track].euclid_offset + d) % NUM_STEPS
       apply_euclidean(selected_track)
     end
-
   elseif page == 3 then
-    -- fx view
     if n == 2 then
-      -- select fx slot (reuse selected_track for slot)
-      selected_track = util.clamp(selected_track + d, 1, NUM_FX_SLOTS)
+      selected_fx_slot = util.clamp(selected_fx_slot + d, 1, NUM_FX_SLOTS)
     elseif n == 3 then
-      -- cycle fx type
-      local slot = util.clamp(selected_track, 1, NUM_FX_SLOTS)
+      local slot = selected_fx_slot
       fx[slot].type = util.clamp(fx[slot].type + d, 0, #FX_NAMES - 1)
       set_fx_type(slot, fx[slot].type)
     end
-
   elseif page == 4 then
-    -- harmony view
     if n == 2 then
-      -- root note
       harmony.root = (harmony.root + d) % 12
-      params:set("root", harmony.root)
+      params:set("root", harmony.root, true)
     elseif n == 3 then
-      -- scale type
       harmony.scale_type = util.clamp(harmony.scale_type + d, 1, SCALE_COUNT)
-      params:set("scale", harmony.scale_type)
+      params:set("scale", harmony.scale_type, true)
     end
   end
-
   redraw()
 end
 
@@ -883,28 +1034,29 @@ function key(n, z)
   if n == 2 then
     k2_held = z == 1
     if z == 1 then
-      if page == 3 then
-        -- on fx page, K2 adjusts param1 (cycle through preset values)
-      else
-        -- toggle play
-        if playing then stop_sequence() else start_sequence() end
-      end
+      if playing then stop_sequence() else start_sequence() end
     end
   elseif n == 3 and z == 1 then
     if k2_held then
-      -- K2+K3: toggle drift
       drift_mode = not drift_mode
-      react_mode = drift_mode  -- react couples with drift
+      react_mode = drift_mode
     else
-      -- K3: generate new pattern for selected track
       if page == 1 or page == 2 then
         generate_pattern(selected_track)
+      elseif page == 3 then
+        -- cycle fx params with K3
+        local slot = selected_fx_slot
+        if fx[slot].type > 0 then
+          fx[slot].param1 = (fx[slot].param1 + 0.15) % 1.01
+          update_fx_params(slot)
+        end
       elseif page == 4 then
-        -- cycle chord mode
         if harmony.chord_mode then
           harmony.chord_type = (harmony.chord_type % 3) + 1
+          params:set("chord_type", harmony.chord_type, true)
         else
           harmony.chord_mode = true
+          params:set("chord_mode", 2, true)
         end
       end
     end
@@ -914,65 +1066,186 @@ end
 
 -- ============ GRID ============
 
+-- grid layout (128 = 16x8):
+--   rows 1-6: step sequencer (x=step, y=voice)
+--     brightness: 0=off, velocity-scaled=active, 15=playing now
+--     hold step + E3 = adjust velocity
+--   row 7: col1-6=track select, col7-12=mute toggle, col13=copy, col14=paste
+--           col15=generate, col16=clear
+--   row 8: col1=play/stop, col2=drift, col3=react
+--           col5-8=pattern page (future), col13-16=fx type quick-select
+
 function grid_redraw()
   if not grid_connected then return end
   g:all(0)
 
-  for t = 1, math.min(NUM_VOICES, 6) do
-    local y = t
+  -- rows 1-6: sequencer
+  for t = 1, NUM_VOICES do
     for s = 1, NUM_STEPS do
-      local x = s
       if seq[t].pattern[s] == 1 then
-        if s == step and playing then
-          g:led(x, y, 15)
+        if s == step and playing and not mutes[t] then
+          g:led(s, t, 15) -- playhead on active step
+        elseif mutes[t] then
+          g:led(s, t, 3)  -- muted: dim
         else
-          -- brightness from probability
-          g:led(x, y, math.floor(seq[t].prob[s] / 100 * 10) + 2)
+          -- brightness from velocity (4-12 range)
+          local vel_bright = math.floor(seq[t].vel[s] * 8) + 4
+          -- dim slightly if low probability
+          if seq[t].prob[s] < 70 then vel_bright = math.max(3, vel_bright - 2) end
+          g:led(s, t, vel_bright)
         end
       else
         if s == step and playing then
-          g:led(x, y, 4)
+          g:led(s, t, 3) -- playhead on empty step
         else
-          g:led(x, y, 0)
+          g:led(s, t, 0)
         end
       end
     end
+
+    -- trigger flash overlay (decays)
+    if flash[t] > 0 then
+      if playing and step >= 1 and step <= 16 then
+        local current_bright = g.rows and 15 or 15
+        g:led(step, t, 15)
+      end
+      flash[t] = flash[t] - 1
+    end
   end
 
-  -- row 7: mode indicators for each voice
+  -- row 7: track select (1-6) + mute (7-12) + copy/paste/gen/clear
   for t = 1, NUM_VOICES do
-    g:led(t, 7, t == selected_track and 12 or 4)
+    -- track select
+    g:led(t, 7, t == selected_track and 15 or 4)
+    -- mute toggle
+    g:led(t + 6, 7, mutes[t] and 15 or 3)
+  end
+  g:led(13, 7, clipboard and 8 or 3)  -- copy (bright if clipboard full)
+  g:led(14, 7, clipboard and 10 or 2) -- paste
+  g:led(15, 7, 6)                      -- generate
+  g:led(16, 7, 4)                      -- clear
+
+  -- row 8: transport + modes + status
+  g:led(1, 8, playing and 15 or 4)     -- play/stop
+  g:led(2, 8, drift_mode and 12 or 3)  -- drift
+  g:led(3, 8, react_mode and 12 or 3)  -- react
+
+  -- euclidean pulse count indicator for selected track (cols 5-12)
+  local ek = seq[selected_track].euclid_k
+  for c = 5, 12 do
+    local pulse_idx = c - 4
+    g:led(c, 8, pulse_idx <= ek and 8 or 2)
   end
 
-  -- row 8: transport + drift
-  g:led(1, 8, playing and 12 or 4)     -- play
-  g:led(2, 8, drift_mode and 12 or 4)  -- drift
-  g:led(3, 8, react_mode and 12 or 4)  -- react
+  -- chord mode indicators (cols 14-16)
+  g:led(14, 8, harmony.chord_mode and (harmony.chord_type == 1 and 12 or 4) or 2) -- major
+  g:led(15, 8, harmony.chord_mode and (harmony.chord_type == 2 and 12 or 4) or 2) -- minor
+  g:led(16, 8, harmony.chord_mode and (harmony.chord_type == 3 and 12 or 4) or 2) -- dim
 
   g:refresh()
 end
 
 g.key = function(x, y, z)
-  if z == 0 then return end
   grid_connected = true
 
+  if z == 1 then
+    -- record press
+    grid_held[x .. "," .. y] = {x = x, y = y, time = util.time()}
+  else
+    -- release
+    local key = x .. "," .. y
+    local held = grid_held[key]
+    grid_held[key] = nil
+
+    -- detect short press vs hold (hold = >0.3s for velocity already handled by E3)
+    if not held then return end
+  end
+
+  -- rows 1-6: step toggle (on press)
   if y >= 1 and y <= 6 and x >= 1 and x <= 16 then
-    -- toggle step
-    local t = y
-    selected_track = t
-    seq[t].pattern[x] = 1 - seq[t].pattern[x]
-    -- reset euclidean if manually editing
-    seq[t].euclid_k = 0
-  elseif y == 7 and x >= 1 and x <= 6 then
-    -- select track
-    selected_track = x
-  elseif y == 8 then
+    if z == 1 then
+      local t = y
+      selected_track = t
+
+      -- check if this is a velocity edit hold (handled in enc)
+      -- for now just toggle on short press
+      local was_on = seq[t].pattern[x] == 1
+      seq[t].pattern[x] = was_on and 0 or 1
+
+      -- if turning on, initialize velocity
+      if not was_on then
+        seq[t].vel[x] = 0.8
+        seq[t].prob[x] = 100
+      end
+
+      -- reset euclidean since manual edit
+      seq[t].euclid_k = 0
+      params:set("v" .. t .. "_euclid", 0, true)
+    end
+
+  -- row 7: track select + mute + clipboard + generate
+  elseif y == 7 and z == 1 then
+    if x >= 1 and x <= 6 then
+      selected_track = x
+    elseif x >= 7 and x <= 12 then
+      local t = x - 6
+      mutes[t] = not mutes[t]
+      params:set("v" .. t .. "_mute", mutes[t] and 2 or 1, true)
+    elseif x == 13 then
+      copy_pattern(selected_track)
+    elseif x == 14 then
+      paste_pattern(selected_track)
+    elseif x == 15 then
+      generate_pattern(selected_track)
+    elseif x == 16 then
+      -- clear selected track
+      for s = 1, NUM_STEPS do
+        seq[selected_track].pattern[s] = 0
+      end
+      seq[selected_track].euclid_k = 0
+    end
+
+  -- row 8: transport + modes + euclidean + chords
+  elseif y == 8 and z == 1 then
     if x == 1 then
       if playing then stop_sequence() else start_sequence() end
     elseif x == 2 then
       drift_mode = not drift_mode
     elseif x == 3 then
       react_mode = not react_mode
+    elseif x >= 5 and x <= 12 then
+      -- set euclidean pulses for selected track
+      local pulses = x - 4
+      -- toggle: if already at this value, turn off
+      if seq[selected_track].euclid_k == pulses then
+        seq[selected_track].euclid_k = 0
+        params:set("v" .. selected_track .. "_euclid", 0, true)
+        -- keep current pattern
+      else
+        seq[selected_track].euclid_k = pulses
+        params:set("v" .. selected_track .. "_euclid", pulses, true)
+        apply_euclidean(selected_track)
+      end
+    elseif x == 14 then
+      -- major chord
+      harmony.chord_mode = true; harmony.chord_type = 1
+      params:set("chord_mode", 2, true)
+      params:set("chord_type", 1, true)
+    elseif x == 15 then
+      -- minor chord
+      harmony.chord_mode = true; harmony.chord_type = 2
+      params:set("chord_mode", 2, true)
+      params:set("chord_type", 2, true)
+    elseif x == 16 then
+      -- dim / toggle chord off
+      if harmony.chord_mode and harmony.chord_type == 3 then
+        harmony.chord_mode = false
+        params:set("chord_mode", 1, true)
+      else
+        harmony.chord_mode = true; harmony.chord_type = 3
+        params:set("chord_mode", 2, true)
+        params:set("chord_type", 3, true)
+      end
     end
   end
 
@@ -985,31 +1258,34 @@ end
 function init()
   init_voice_presets()
   build_params()
-
-  -- connect MIDI
   midi_out = midi.connect(params:get("midi_device"))
 
   -- screen refresh
   local screen_metro = metro.init()
-  screen_metro.event = function() redraw() end
+  screen_metro.event = function()
+    -- decay flash counters
+    for t = 1, NUM_VOICES do
+      if flash[t] > 0 then flash[t] = flash[t] - 1 end
+    end
+    redraw()
+  end
   screen_metro.time = 1/15
   screen_metro:start()
 
-  -- check grid
+  -- grid refresh metro (keeps grid alive during holds etc)
+  local grid_metro = metro.init()
+  grid_metro.event = function() grid_redraw() end
+  grid_metro.time = 1/10
+  grid_metro:start()
+
   grid_connected = g.device ~= nil
 
-  -- generate initial patterns
-  -- kick: four on the floor
+  -- initial patterns
   seq[1].pattern = {1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0}
-  -- snare: 2 and 4
   seq[2].pattern = {0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0}
-  -- hat: euclidean 5/16
   seq[3].euclid_k = 5; apply_euclidean(3)
-  -- perc: euclidean 3/16
   seq[4].euclid_k = 3; apply_euclidean(4)
-  -- tone: sparse
   seq[5].pattern = {1,0,0,0, 0,0,0,0, 0,0,1,0, 0,0,0,0}
-  -- fx: euclidean 2/16
   seq[6].euclid_k = 2; apply_euclidean(6)
 
   params:bang()
