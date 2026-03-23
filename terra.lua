@@ -2109,106 +2109,81 @@ end
 
 local function build_params()
   params:add_separator("TERRA")
-  params:add_separator("TRANSPORT")
 
+  -- === TRANSPORT ===
+  params:add_separator("TRANSPORT")
   params:add_option("playing", "playing", {"off", "on"}, 1)
   params:set_action("playing", function(v)
     if v == 2 then start_sequence() else stop_sequence() end
   end)
-
   params:add_control("swing", "swing",
     controlspec.new(0, 80, 'lin', 1, 0, "%"))
   params:set_action("swing", function(v) swing_amt = v end)
 
-  -- per-voice params
+  -- === VOICES (1-6) ===
   for i = 1, NUM_VOICES do
     params:add_separator("VOICE " .. i .. ": " .. VOICE_NAMES[i])
-
     params:add_option("v" .. i .. "_mode", "mode", MODE_NAMES, voices[i].mode + 1)
     params:set_action("v" .. i .. "_mode", function(v) voices[i].mode = v - 1 end)
-
     params:add_number("v" .. i .. "_note", "note", 24, 108, voices[i].base_freq)
     params:set_action("v" .. i .. "_note", function(v) voices[i].base_freq = v end)
-
     params:add_control("v" .. i .. "_decay", "decay",
       controlspec.new(0.01, 2.0, 'exp', 0.01, voices[i].decay, "s"))
     params:set_action("v" .. i .. "_decay", function(v) voices[i].decay = v end)
-
     params:add_control("v" .. i .. "_filter", "filter freq",
       controlspec.new(40, 18000, 'exp', 0, voices[i].filter_freq, "hz"))
     params:set_action("v" .. i .. "_filter", function(v) voices[i].filter_freq = v end)
-
     params:add_control("v" .. i .. "_res", "filter res",
       controlspec.new(0.05, 1.0, 'lin', 0.01, voices[i].filter_res))
     params:set_action("v" .. i .. "_res", function(v) voices[i].filter_res = v end)
-
     params:add_option("v" .. i .. "_ftype", "filter type", {"LP", "HP", "BP"}, voices[i].filter_type + 1)
     params:set_action("v" .. i .. "_ftype", function(v) voices[i].filter_type = v - 1 end)
-
     params:add_control("v" .. i .. "_penv", "pitch env",
       controlspec.new(0, 16, 'lin', 0.1, voices[i].pitch_env))
     params:set_action("v" .. i .. "_penv", function(v) voices[i].pitch_env = v end)
-
     params:add_control("v" .. i .. "_pdecay", "pitch decay",
       controlspec.new(0.005, 0.5, 'exp', 0.001, voices[i].pitch_decay, "s"))
     params:set_action("v" .. i .. "_pdecay", function(v) voices[i].pitch_decay = v end)
-
     params:add_control("v" .. i .. "_pan", "pan",
       controlspec.new(-1, 1, 'lin', 0.01, voices[i].pan))
     params:set_action("v" .. i .. "_pan", function(v) voices[i].pan = v end)
-
     params:add_control("v" .. i .. "_spread", "stereo spread",
       controlspec.new(0, 1, 'lin', 0.01, voices[i].spread))
     params:set_action("v" .. i .. "_spread", function(v) voices[i].spread = v end)
-
     params:add_control("v" .. i .. "_amp", "amp",
       controlspec.new(0, 1, 'lin', 0.01, voices[i].amp))
     params:set_action("v" .. i .. "_amp", function(v) voices[i].amp = v end)
-
     params:add_number("v" .. i .. "_euclid", "euclidean pulses", 0, 16, 0)
     params:set_action("v" .. i .. "_euclid", function(v)
       seq[i].euclid_k = v; apply_euclidean(i)
     end)
-
-    -- per-track probability (robot-controllable)
     params:add_number("v" .. i .. "_prob", "track probability", 0, 100, 100)
-    params:set_action("v" .. i .. "_prob", function(v)
-      seq[i].track_prob = v
-    end)
-
-    -- per-track mute (robot-controllable)
+    params:set_action("v" .. i .. "_prob", function(v) seq[i].track_prob = v end)
     params:add_option("v" .. i .. "_mute", "mute", {"off", "on"}, 1)
-    params:set_action("v" .. i .. "_mute", function(v)
-      mutes[i] = v == 2
-    end)
+    params:set_action("v" .. i .. "_mute", function(v) mutes[i] = v == 2 end)
   end
 
-  -- fx params
-  -- timbre engineer
-  params:add_separator("TIMBRE ENGINEER")
-  params:add_option("timbre_style", "style", TIMBRE_STYLES, 1)
-  params:set_action("timbre_style", function(v) timbre.style = v - 1 end)
+  -- === HARMONY ===
+  params:add_separator("HARMONY")
+  params:add_number("root", "root note", 0, 11, 0)
+  params:set_action("root", function(v)
+    harmony.root = v
+    for i, n in ipairs(CIRCLE_OF_FIFTHS) do
+      if n == v then harmony.circle_pos = i; break end
+    end
+  end)
+  params:add_option("scale", "scale", SCALE_NAMES, 1)
+  params:set_action("scale", function(v) harmony.scale_type = v end)
+  params:add_option("chord_mode", "chord mode", {"off", "on"}, 1)
+  params:set_action("chord_mode", function(v) harmony.chord_mode = v == 2 end)
+  params:add_option("chord_type", "chord type", {"major", "minor", "dim"}, 1)
+  params:set_action("chord_type", function(v) harmony.chord_type = v end)
+  params:add_number("harmonic_drift", "harmonic drift", 0, 5, 0)
+  params:set_action("harmonic_drift", function(v) harmony.drift_rate = v end)
 
-  params:add_control("timbre_intensity", "intensity",
-    controlspec.new(0, 1, 'lin', 0.01, 0.5))
-  params:set_action("timbre_intensity", function(v) timbre.intensity = v end)
-
-  -- presets (save/recall snapshots)
-  params:add_separator("PRESETS")
-  for i = 1, NUM_PRESETS do
-    params:add_trigger("preset_save_" .. i, "save slot " .. i)
-    params:set_action("preset_save_" .. i, function() save_preset(i) end)
-    params:add_trigger("preset_load_" .. i, "load slot " .. i)
-    params:set_action("preset_load_" .. i, function() load_preset(i) end)
-  end
-  params:add_trigger("save_to_disk", "> save patterns to disk")
-  params:set_action("save_to_disk", function() save_patterns_to_disk() end)
-  params:add_trigger("load_from_disk", "> load patterns from disk")
-  params:set_action("load_from_disk", function() load_patterns_from_disk() end)
-
-  -- bandleader
+  -- === BANDLEADER (master conductor) ===
   params:add_separator("BANDLEADER")
-  params:add_option("bandleader", "bandleader", BANDLEADER_STYLES, 1)
+  params:add_option("bandleader", "mindset", BANDLEADER_STYLES, 1)
   params:set_action("bandleader", function(v)
     if v == 1 then
       bandleader.active = false
@@ -2221,27 +2196,34 @@ local function build_params()
     end
   end)
 
-  -- pattern engineer
+  -- === TIMBRE ENGINEER ===
+  params:add_separator("TIMBRE ENGINEER")
+  params:add_option("timbre_style", "style", TIMBRE_STYLES, 1)
+  params:set_action("timbre_style", function(v) timbre.style = v - 1 end)
+  params:add_control("timbre_intensity", "intensity",
+    controlspec.new(0, 1, 'lin', 0.01, 0.5))
+  params:set_action("timbre_intensity", function(v) timbre.intensity = v end)
+
+  -- === PATTERN ENGINEER ===
   params:add_separator("PATTERN ENGINEER")
   params:add_option("pat_style", "style", PAT_STYLES, 1)
   params:set_action("pat_style", function(v) pat_eng.style = v - 1 end)
-
   params:add_control("pat_intensity", "intensity",
     controlspec.new(0, 1, 'lin', 0.01, 0.5))
   params:set_action("pat_intensity", function(v) pat_eng.intensity = v end)
 
-  -- filter engineer
+  -- === FILTER ENGINEER ===
   params:add_separator("FILTER ENGINEER")
   params:add_option("filt_style", "style", FILT_STYLES, 1)
   params:set_action("filt_style", function(v)
     if v == 1 and filt_eng.style > 0 then filter_engineer_cleanup() end
     filt_eng.style = v - 1
   end)
-
   params:add_control("filt_intensity", "intensity",
     controlspec.new(0, 1, 'lin', 0.01, 0.5))
   params:set_action("filt_intensity", function(v) filt_eng.intensity = v end)
 
+  -- === FX CHAIN ===
   params:add_separator("FX CHAIN")
   for i = 1, NUM_FX_SLOTS do
     params:add_option("fx" .. i .. "_type", "fx " .. i .. " type", FX_NAMES, 1)
@@ -2260,43 +2242,16 @@ local function build_params()
     end)
   end
 
-  -- duck
+  -- === SIDECHAIN ===
   params:add_separator("SIDECHAIN")
   params:add_control("duck_amt", "duck amount",
     controlspec.new(0, 1, 'lin', 0.01, 0))
-  params:set_action("duck_amt", function(v)
-    duck_amt = v; engine.duck_amt(v)
-  end)
+  params:set_action("duck_amt", function(v) duck_amt = v; engine.duck_amt(v) end)
   params:add_control("duck_decay", "duck decay",
     controlspec.new(0.03, 0.5, 'exp', 0.01, 0.15, "s"))
-  params:set_action("duck_decay", function(v)
-    duck_decay = v; engine.duck_decay(v)
-  end)
+  params:set_action("duck_decay", function(v) duck_decay = v; engine.duck_decay(v) end)
 
-  -- harmony
-  params:add_separator("HARMONY")
-  params:add_number("root", "root note", 0, 11, 0)
-  params:set_action("root", function(v)
-    harmony.root = v
-    for i, n in ipairs(CIRCLE_OF_FIFTHS) do
-      if n == v then harmony.circle_pos = i; break end
-    end
-  end)
-
-  params:add_option("scale", "scale", SCALE_NAMES, 1)
-  params:set_action("scale", function(v) harmony.scale_type = v end)
-
-  params:add_option("chord_mode", "chord mode", {"off", "on"}, 1)
-  params:set_action("chord_mode", function(v) harmony.chord_mode = v == 2 end)
-
-  params:add_option("chord_type", "chord type", {"major", "minor", "dim"}, 1)
-  params:set_action("chord_type", function(v) harmony.chord_type = v end)
-
-  params:add_number("harmonic_drift", "harmonic drift", 0, 5, 0)
-  params:set_action("harmonic_drift", function(v) harmony.drift_rate = v end)
-
-  -- midi out
-  -- softcut looper
+  -- === LOOPER ===
   params:add_separator("LOOPER")
   params:add_option("loop_rec", "record", {"off", "on"}, 1)
   params:set_action("loop_rec", function(v)
@@ -2323,14 +2278,26 @@ local function build_params()
     softcut.loop_end(2, v)
   end)
 
+  -- === PRESETS ===
+  params:add_separator("PRESETS")
+  for i = 1, NUM_PRESETS do
+    params:add_trigger("preset_save_" .. i, "save slot " .. i)
+    params:set_action("preset_save_" .. i, function() save_preset(i) end)
+    params:add_trigger("preset_load_" .. i, "load slot " .. i)
+    params:set_action("preset_load_" .. i, function() load_preset(i) end)
+  end
+  params:add_trigger("save_to_disk", "> save to disk")
+  params:set_action("save_to_disk", function() save_patterns_to_disk() end)
+  params:add_trigger("load_from_disk", "> load from disk")
+  params:set_action("load_from_disk", function() load_patterns_from_disk() end)
+
+  -- === MIDI ===
   params:add_separator("MIDI OUT")
   params:add_number("midi_device", "midi device", 1, 4, 1)
   params:set_action("midi_device", function(v) midi_out = midi.connect(v) end)
-
   params:add_number("midi_drum_ch", "drum channel", 1, 16, 10)
   params:add_number("midi_melody_ch", "melody channel", 1, 16, 1)
 
-  -- OP-XY
   params:add_separator("OP-XY")
   params:add_option("opxy_enabled", "OP-XY out", {"off", "on"}, 1)
   params:add_number("opxy_device", "OP-XY device", 1, 4, 2)
@@ -2340,7 +2307,6 @@ local function build_params()
   params:add_number("opxy_drum_ch", "OP-XY drum ch", 1, 16, 1)
   params:add_number("opxy_melody_ch", "OP-XY melody ch", 1, 16, 2)
 
-  -- MIDI in
   params:add_separator("MIDI IN")
   params:add_number("midi_in_device", "midi in device", 1, 4, 1)
   params:set_action("midi_in_device", function(v)
