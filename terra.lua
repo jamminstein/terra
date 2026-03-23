@@ -360,6 +360,142 @@ local function sculpt_deep(v, t, amount)
   end
 end
 
+-- ============ DRUM BRAIN ============
+-- Curated library of great kick and snare configurations.
+-- Every entry is a complete voice setup that sounds GOOD.
+-- The timbre engineer draws from these instead of random params.
+-- Each config specifies: mode, and all relevant params for that mode.
+
+local KICK_BRAIN = {
+  -- 808 sub: deep sine, long decay, heavy pitch sweep
+  {mode=1, freq=42, decay=0.6, shape=0, noise_amt=0, filter_freq=800, filter_res=0.15,
+   filter_type=0, pitch_env=10, pitch_decay=0.035, filter_env_amt=600, spread=0.1},
+  -- punchy house: sine with click transient, tight
+  {mode=1, freq=50, decay=0.3, shape=0, noise_amt=0.15, filter_freq=2500, filter_res=0.3,
+   filter_type=0, pitch_env=6, pitch_decay=0.02, filter_env_amt=2000, spread=0.15},
+  -- industrial: distorted, high pitch sweep, noise attack
+  {mode=1, freq=55, decay=0.25, shape=0.3, noise_amt=0.4, filter_freq=4000, filter_res=0.5,
+   filter_type=0, pitch_env=14, pitch_decay=0.015, filter_env_amt=3500, spread=0.2},
+  -- minimal techno: tight sine, very short, subtle pitch
+  {mode=1, freq=48, decay=0.15, shape=0, noise_amt=0, filter_freq=1200, filter_res=0.1,
+   filter_type=0, pitch_env=4, pitch_decay=0.03, filter_env_amt=800, spread=0.05},
+  -- boom bap: round, medium decay, warm filter
+  {mode=1, freq=45, decay=0.45, shape=0, noise_amt=0.05, filter_freq=1500, filter_res=0.2,
+   filter_type=0, pitch_env=8, pitch_decay=0.04, filter_env_amt=1000, spread=0.1},
+  -- FM kick: metallic attack, sine body
+  {mode=0, freq=44, decay=0.35, fm_index=2.5, fm_ratio=1.0, filter_freq=1800, filter_res=0.2,
+   filter_type=0, pitch_env=12, pitch_decay=0.02, spread=0.1},
+  -- gabber: extreme pitch sweep, hard distortion character
+  {mode=1, freq=52, decay=0.2, shape=0.6, noise_amt=0.3, filter_freq=6000, filter_res=0.6,
+   filter_type=0, pitch_env=16, pitch_decay=0.01, filter_env_amt=5000, spread=0.3},
+  -- dub: very low, long tail, sub-heavy
+  {mode=1, freq=38, decay=0.8, shape=0, noise_amt=0, filter_freq=600, filter_res=0.1,
+   filter_type=0, pitch_env=6, pitch_decay=0.06, filter_env_amt=400, spread=0.05},
+  -- electro: sharp click, tight body
+  {mode=1, freq=55, decay=0.18, shape=0.15, noise_amt=0.25, filter_freq=3500, filter_res=0.35,
+   filter_type=0, pitch_env=8, pitch_decay=0.012, filter_env_amt=3000, spread=0.15},
+  -- noise kick: burst of filtered noise, no tone
+  {mode=2, freq=60, decay=0.22, noise_type=0, grain_rate=80, ring_amt=0, filter_freq=1500,
+   filter_res=0.4, filter_type=0, pitch_env=3, pitch_decay=0.02, spread=0.1},
+  -- TR-909: punchy sine + noise transient
+  {mode=1, freq=50, decay=0.35, shape=0, noise_amt=0.2, filter_freq=2000, filter_res=0.25,
+   filter_type=0, pitch_env=7, pitch_decay=0.025, filter_env_amt=1800, spread=0.1},
+  -- broken: detuned FM, glitchy character
+  {mode=0, freq=46, decay=0.28, fm_index=4.0, fm_ratio=0.75, filter_freq=2500, filter_res=0.4,
+   filter_type=0, pitch_env=9, pitch_decay=0.018, spread=0.25},
+}
+
+local SNARE_BRAIN = {
+  -- tight acoustic: noise + tone, crisp
+  {mode=2, freq=180, decay=0.15, noise_type=0, grain_rate=90, ring_amt=0, filter_freq=5500,
+   filter_res=0.35, filter_type=0, pitch_env=3, pitch_decay=0.02, spread=0.2},
+  -- fat hip-hop: long noise tail, warm
+  {mode=2, freq=150, decay=0.3, noise_type=0.3, grain_rate=60, ring_amt=0, filter_freq=4000,
+   filter_res=0.25, filter_type=0, pitch_env=5, pitch_decay=0.03, spread=0.15},
+  -- 808 clap: layered noise bursts
+  {mode=2, freq=200, decay=0.2, noise_type=0, grain_rate=40, ring_amt=0, filter_freq=6000,
+   filter_res=0.3, filter_type=1, pitch_env=2, pitch_decay=0.01, spread=0.4},
+  -- metallic: FM ring, sharp
+  {mode=0, freq=190, decay=0.12, fm_index=3.0, fm_ratio=2.3, filter_freq=8000, filter_res=0.5,
+   filter_type=2, pitch_env=4, pitch_decay=0.015, spread=0.3},
+  -- brush: soft noise, high filter, gentle
+  {mode=2, freq=250, decay=0.25, noise_type=0.5, grain_rate=120, ring_amt=0, filter_freq=7000,
+   filter_res=0.15, filter_type=0, pitch_env=1, pitch_decay=0.04, spread=0.35},
+  -- rimshot: very short, high pitch, BP filter
+  {mode=1, freq=220, decay=0.05, shape=0.4, noise_amt=0.5, filter_freq=4500, filter_res=0.7,
+   filter_type=2, pitch_env=8, pitch_decay=0.008, filter_env_amt=4000, spread=0.2},
+  -- industrial snare: distorted noise, crunchy
+  {mode=2, freq=160, decay=0.18, noise_type=0.8, grain_rate=30, ring_amt=0.3, filter_freq=3500,
+   filter_res=0.6, filter_type=0, pitch_env=6, pitch_decay=0.012, spread=0.25},
+  -- 909 snare: classic noise + tone blend
+  {mode=2, freq=180, decay=0.22, noise_type=0.1, grain_rate=70, ring_amt=0, filter_freq=5000,
+   filter_res=0.3, filter_type=0, pitch_env=4, pitch_decay=0.025, spread=0.2},
+  -- broken snare: ring mod metallic
+  {mode=2, freq=200, decay=0.16, noise_type=0.2, grain_rate=50, ring_amt=0.5, filter_freq=6000,
+   filter_res=0.45, filter_type=2, pitch_env=5, pitch_decay=0.015, spread=0.35},
+  -- lo-fi: crushed, dark filter, gritty
+  {mode=2, freq=140, decay=0.2, noise_type=0.6, grain_rate=25, ring_amt=0.1, filter_freq=2500,
+   filter_res=0.5, filter_type=0, pitch_env=3, pitch_decay=0.03, spread=0.15},
+  -- FM snare: bell-like overtones
+  {mode=0, freq=170, decay=0.18, fm_index=2.0, fm_ratio=3.5, filter_freq=7000, filter_res=0.3,
+   filter_type=0, pitch_env=3, pitch_decay=0.02, spread=0.3},
+  -- ghost note: barely there, ultra short, quiet
+  {mode=2, freq=200, decay=0.04, noise_type=0, grain_rate=100, ring_amt=0, filter_freq=4000,
+   filter_res=0.2, filter_type=0, pitch_env=1, pitch_decay=0.01, spread=0.1},
+}
+
+-- apply a drum brain preset to a voice, with optional blend amount
+local function apply_drum_preset(v, preset, blend)
+  blend = blend or 1.0
+  local inv = 1 - blend
+  v.mode = preset.mode  -- mode always snaps (discrete)
+  v.base_freq = math.floor(v.base_freq * inv + preset.freq * blend + 0.5)
+  v.decay = v.decay * inv + preset.decay * blend
+  v.filter_freq = v.filter_freq * inv + preset.filter_freq * blend
+  v.filter_res = v.filter_res * inv + preset.filter_res * blend
+  v.filter_type = preset.filter_type  -- snap
+  v.pitch_env = v.pitch_env * inv + preset.pitch_env * blend
+  v.pitch_decay = v.pitch_decay * inv + preset.pitch_decay * blend
+  v.spread = v.spread * inv + preset.spread * blend
+  -- mode-specific
+  if preset.mode == 0 then
+    v.fm_index = (v.fm_index or 1) * inv + (preset.fm_index or 1) * blend
+    v.fm_ratio = (v.fm_ratio or 1.414) * inv + (preset.fm_ratio or 1.414) * blend
+  elseif preset.mode == 1 then
+    v.shape = (v.shape or 0) * inv + (preset.shape or 0) * blend
+    v.noise_amt = (v.noise_amt or 0) * inv + (preset.noise_amt or 0) * blend
+    v.filter_env_amt = (v.filter_env_amt or 2000) * inv + (preset.filter_env_amt or 2000) * blend
+  elseif preset.mode == 2 then
+    v.noise_type = (v.noise_type or 0) * inv + (preset.noise_type or 0) * blend
+    v.grain_rate = (v.grain_rate or 40) * inv + (preset.grain_rate or 40) * blend
+    v.ring_amt = (v.ring_amt or 0) * inv + (preset.ring_amt or 0) * blend
+  end
+end
+
+-- pick a great drum sound: sometimes snap, sometimes blend
+local function drum_brain_hit(track)
+  if timbre.style < 6 then return end  -- only for per-hit styles
+  local int = timbre.intensity
+  local v = voices[track]
+
+  if track == 1 then
+    -- KICK: pick from kick brain
+    if math.random() < 0.15 + int * 0.25 then
+      local preset = KICK_BRAIN[math.random(1, #KICK_BRAIN)]
+      -- blend amount: sometimes subtle morph, sometimes full snap
+      local blend = math.random() < 0.3 * int and 1.0 or randf(0.2, 0.6) * int
+      apply_drum_preset(v, preset, blend)
+    end
+  elseif track == 2 then
+    -- SNARE: pick from snare brain
+    if math.random() < 0.15 + int * 0.25 then
+      local preset = SNARE_BRAIN[math.random(1, #SNARE_BRAIN)]
+      local blend = math.random() < 0.3 * int and 1.0 or randf(0.2, 0.6) * int
+      apply_drum_preset(v, preset, blend)
+    end
+  end
+end
+
 local function timbre_engineer_step(step_num)
   if timbre.style == 0 then return end
 
@@ -1642,6 +1778,8 @@ local function trigger_voice(track, velocity)
   end
   -- per-hit mutation (MUTATE style)
   mutate_on_hit(track)
+  -- drum brain: curated kick/snare sound design
+  drum_brain_hit(track)
 
   local hz = musicutil.note_num_to_freq(freq)
   local amp = v.amp * velocity
