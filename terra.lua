@@ -1868,6 +1868,245 @@ end
 
 -- ============ PARAMS ============
 
+
+-- ============ PRESET SNAPSHOTS ============
+-- 8 slots to save/recall the entire state
+
+local NUM_PRESETS = 8
+local presets = {}
+
+local function snapshot_state()
+  local state = {
+    voices = {},
+    seq = {},
+    mutes = {table.unpack(mutes)},
+    harmony = {
+      root = harmony.root, scale_type = harmony.scale_type,
+      chord_mode = harmony.chord_mode, chord_type = harmony.chord_type,
+      drift_rate = harmony.drift_rate,
+    },
+    timbre_style = timbre.style, timbre_intensity = timbre.intensity,
+    pat_style = pat_eng.style, pat_intensity = pat_eng.intensity,
+    filt_style = filt_eng.style, filt_intensity = filt_eng.intensity,
+    bandleader_mindset = bandleader.mindset, bandleader_active = bandleader.active,
+    fx = {},
+    duck_amt = duck_amt, duck_decay = duck_decay,
+    swing_amt = swing_amt,
+  }
+  for i = 1, NUM_VOICES do
+    local v = voices[i]
+    state.voices[i] = {
+      mode = v.mode, base_freq = v.base_freq, decay = v.decay,
+      filter_freq = v.filter_freq, filter_res = v.filter_res, filter_type = v.filter_type,
+      pitch_env = v.pitch_env, pitch_decay = v.pitch_decay,
+      pan = v.pan, spread = v.spread, detune = v.detune, amp = v.amp,
+      fm_index = v.fm_index, fm_ratio = v.fm_ratio,
+      shape = v.shape, noise_amt = v.noise_amt, filter_env_amt = v.filter_env_amt,
+      noise_type = v.noise_type, grain_rate = v.grain_rate, ring_amt = v.ring_amt,
+    }
+    state.seq[i] = {
+      pattern = {table.unpack(seq[i].pattern)},
+      prob = {table.unpack(seq[i].prob)},
+      vel = {table.unpack(seq[i].vel)},
+      euclid_k = seq[i].euclid_k, euclid_offset = seq[i].euclid_offset,
+      track_prob = seq[i].track_prob,
+    }
+  end
+  for i = 1, NUM_FX_SLOTS do
+    state.fx[i] = { type = fx[i].type, param1 = fx[i].param1, param2 = fx[i].param2 }
+  end
+  return state
+end
+
+local function recall_state(state)
+  if not state then return end
+  for i = 1, NUM_VOICES do
+    for k, v in pairs(state.voices[i]) do voices[i][k] = v end
+    for s = 1, NUM_STEPS do
+      seq[i].pattern[s] = state.seq[i].pattern[s]
+      seq[i].prob[s] = state.seq[i].prob[s]
+      seq[i].vel[s] = state.seq[i].vel[s]
+    end
+    seq[i].euclid_k = state.seq[i].euclid_k
+    seq[i].euclid_offset = state.seq[i].euclid_offset
+    seq[i].track_prob = state.seq[i].track_prob
+    mutes[i] = state.mutes[i]
+  end
+  harmony.root = state.harmony.root
+  harmony.scale_type = state.harmony.scale_type
+  harmony.chord_mode = state.harmony.chord_mode
+  harmony.chord_type = state.harmony.chord_type
+  harmony.drift_rate = state.harmony.drift_rate
+  timbre.style = state.timbre_style
+  timbre.intensity = state.timbre_intensity
+  pat_eng.style = state.pat_style
+  pat_eng.intensity = state.pat_intensity
+  filt_eng.style = state.filt_style
+  filt_eng.intensity = state.filt_intensity
+  bandleader.mindset = state.bandleader_mindset
+  bandleader.active = state.bandleader_active
+  swing_amt = state.swing_amt
+  duck_amt = state.duck_amt; engine.duck_amt(duck_amt)
+  duck_decay = state.duck_decay; engine.duck_decay(duck_decay)
+  for i = 1, NUM_FX_SLOTS do
+    fx[i].type = state.fx[i].type
+    fx[i].param1 = state.fx[i].param1
+    fx[i].param2 = state.fx[i].param2
+    set_fx_type(i, fx[i].type)
+    update_fx_params(i)
+  end
+end
+
+local function save_preset(slot)
+  presets[slot] = snapshot_state()
+end
+
+local function load_preset(slot)
+  recall_state(presets[slot])
+end
+
+-- simple table serializer (tab.serialize may not exist on all norns)
+local function _ser(t, ind)
+  ind = ind or ""
+  local ni = ind .. "  "
+  local p = {"{"}
+  for k, v in pairs(t) do
+    local ks = type(k) == "number" and ("[" .. k .. "]") or k
+    local vs
+    if type(v) == "table" then vs = _ser(v, ni)
+    elseif type(v) == "string" then vs = string.format("%q", v)
+    elseif type(v) == "boolean" then vs = v and "true" or "false"
+    else vs = tostring(v) end
+    p[#p+1] = ni .. ks .. "=" .. vs .. ","
+  end
+  p[#p+1] = ind .. "}"
+  return table.concat(p, "\n")
+end
+
+local function save_patterns_to_disk()
+  local data = snapshot_state()
+  local dir = norns.state.data
+  os.execute("mkdir -p " .. dir)
+  local file = io.open(dir .. "patterns.lua", "w")
+  if file then
+    file:write("return " .. _ser(data))
+    file:close()
+    print("terra: patterns saved")
+  end
+end
+
+local function load_patterns_from_disk()
+  local dir = norns.state.data
+  local path = dir .. "patterns.lua"
+  local file = io.open(path, "r")
+  if file then
+    file:close()
+    local ok, data = pcall(dofile, path)
+    if ok and data then
+      recall_state(data)
+      print("terra: patterns loaded from " .. path)
+    end
+  end
+end
+
+-- ============ SOFTCUT LOOPER ============
+-- Records terra's output into a softcut buffer and plays it back
+-- with speed/direction/grain manipulation
+
+local sc_loop = {
+  recording = false,
+  playing = false,
+  rate = 1.0,
+  level = 0.5,
+  loop_start = 0,
+  loop_end = 4,  -- seconds
+  rec_head = 0,
+  filter = 1.0,  -- 0=dark, 1=bright
+}
+
+local function softcut_init()
+  -- voice 1: record from input (terra's output goes to DAC which we can monitor)
+  -- voice 2: playback
+  softcut.buffer_clear()
+
+  -- playback voice
+  softcut.enable(1, 1)
+  softcut.buffer(1, 1)
+  softcut.level(1, sc_loop.level)
+  softcut.pan(1, 0)
+  softcut.rate(1, sc_loop.rate)
+  softcut.loop(1, 1)
+  softcut.loop_start(1, 0)
+  softcut.loop_end(1, sc_loop.loop_end)
+  softcut.position(1, 0)
+  softcut.play(1, 0)
+  softcut.pre_level(1, 0.8)
+  softcut.rec_level(1, 1)
+  softcut.rec(1, 0)
+  softcut.level_slew_time(1, 0.1)
+  softcut.rate_slew_time(1, 0.1)
+  softcut.post_filter_dry(1, 0.5)
+  softcut.post_filter_lp(1, 1.0)
+
+  -- record voice (monitors input)
+  softcut.enable(2, 1)
+  softcut.buffer(2, 1)
+  softcut.level(2, 0)  -- silent (just recording)
+  softcut.rate(2, 1)
+  softcut.loop(2, 1)
+  softcut.loop_start(2, 0)
+  softcut.loop_end(2, sc_loop.loop_end)
+  softcut.position(2, 0)
+  softcut.play(2, 1)
+  softcut.rec_level(2, 1)
+  softcut.pre_level(2, 0.6)  -- some overdub
+  softcut.rec(2, 0)
+  softcut.level_input_cut(1, 2, 1.0)  -- input 1 to record voice
+  softcut.level_input_cut(2, 2, 1.0)  -- input 2 to record voice
+end
+
+local function sc_start_record()
+  sc_loop.recording = true
+  softcut.rec(2, 1)
+  softcut.position(2, 0)
+end
+
+local function sc_stop_record()
+  sc_loop.recording = false
+  softcut.rec(2, 0)
+end
+
+local function sc_start_playback()
+  sc_loop.playing = true
+  softcut.level(1, sc_loop.level)
+  softcut.rate(1, sc_loop.rate)
+  softcut.play(1, 1)
+  softcut.position(1, 0)
+end
+
+local function sc_stop_playback()
+  sc_loop.playing = false
+  softcut.play(1, 0)
+  softcut.level(1, 0)
+end
+
+local function sc_set_rate(r)
+  sc_loop.rate = r
+  softcut.rate(1, r)
+end
+
+local function sc_set_level(l)
+  sc_loop.level = l
+  softcut.level(1, l)
+end
+
+local function sc_set_filter(f)
+  sc_loop.filter = f
+  softcut.post_filter_lp(1, f)
+  softcut.post_filter_dry(1, 1 - f * 0.5)
+end
+
+
 local function build_params()
   params:add_separator("TERRA")
   params:add_separator("TRANSPORT")
@@ -2836,227 +3075,6 @@ function init()
 
   params:bang()
   screen_dirty = true; grid_dirty = true
-end
-
--- ============ PRESET SNAPSHOTS ============
--- 8 slots to save/recall the entire state
-
-local NUM_PRESETS = 8
-local presets = {}
-
-local function snapshot_state()
-  local state = {
-    voices = {},
-    seq = {},
-    mutes = {table.unpack(mutes)},
-    harmony = {
-      root = harmony.root, scale_type = harmony.scale_type,
-      chord_mode = harmony.chord_mode, chord_type = harmony.chord_type,
-      drift_rate = harmony.drift_rate,
-    },
-    timbre_style = timbre.style, timbre_intensity = timbre.intensity,
-    pat_style = pat_eng.style, pat_intensity = pat_eng.intensity,
-    filt_style = filt_eng.style, filt_intensity = filt_eng.intensity,
-    bandleader_mindset = bandleader.mindset, bandleader_active = bandleader.active,
-    fx = {},
-    duck_amt = duck_amt, duck_decay = duck_decay,
-    swing_amt = swing_amt,
-  }
-  for i = 1, NUM_VOICES do
-    local v = voices[i]
-    state.voices[i] = {
-      mode = v.mode, base_freq = v.base_freq, decay = v.decay,
-      filter_freq = v.filter_freq, filter_res = v.filter_res, filter_type = v.filter_type,
-      pitch_env = v.pitch_env, pitch_decay = v.pitch_decay,
-      pan = v.pan, spread = v.spread, detune = v.detune, amp = v.amp,
-      fm_index = v.fm_index, fm_ratio = v.fm_ratio,
-      shape = v.shape, noise_amt = v.noise_amt, filter_env_amt = v.filter_env_amt,
-      noise_type = v.noise_type, grain_rate = v.grain_rate, ring_amt = v.ring_amt,
-    }
-    state.seq[i] = {
-      pattern = {table.unpack(seq[i].pattern)},
-      prob = {table.unpack(seq[i].prob)},
-      vel = {table.unpack(seq[i].vel)},
-      euclid_k = seq[i].euclid_k, euclid_offset = seq[i].euclid_offset,
-      track_prob = seq[i].track_prob,
-    }
-  end
-  for i = 1, NUM_FX_SLOTS do
-    state.fx[i] = { type = fx[i].type, param1 = fx[i].param1, param2 = fx[i].param2 }
-  end
-  return state
-end
-
-local function recall_state(state)
-  if not state then return end
-  for i = 1, NUM_VOICES do
-    for k, v in pairs(state.voices[i]) do voices[i][k] = v end
-    for s = 1, NUM_STEPS do
-      seq[i].pattern[s] = state.seq[i].pattern[s]
-      seq[i].prob[s] = state.seq[i].prob[s]
-      seq[i].vel[s] = state.seq[i].vel[s]
-    end
-    seq[i].euclid_k = state.seq[i].euclid_k
-    seq[i].euclid_offset = state.seq[i].euclid_offset
-    seq[i].track_prob = state.seq[i].track_prob
-    mutes[i] = state.mutes[i]
-  end
-  harmony.root = state.harmony.root
-  harmony.scale_type = state.harmony.scale_type
-  harmony.chord_mode = state.harmony.chord_mode
-  harmony.chord_type = state.harmony.chord_type
-  harmony.drift_rate = state.harmony.drift_rate
-  timbre.style = state.timbre_style
-  timbre.intensity = state.timbre_intensity
-  pat_eng.style = state.pat_style
-  pat_eng.intensity = state.pat_intensity
-  filt_eng.style = state.filt_style
-  filt_eng.intensity = state.filt_intensity
-  bandleader.mindset = state.bandleader_mindset
-  bandleader.active = state.bandleader_active
-  swing_amt = state.swing_amt
-  duck_amt = state.duck_amt; engine.duck_amt(duck_amt)
-  duck_decay = state.duck_decay; engine.duck_decay(duck_decay)
-  for i = 1, NUM_FX_SLOTS do
-    fx[i].type = state.fx[i].type
-    fx[i].param1 = state.fx[i].param1
-    fx[i].param2 = state.fx[i].param2
-    set_fx_type(i, fx[i].type)
-    update_fx_params(i)
-  end
-end
-
-local function save_preset(slot)
-  presets[slot] = snapshot_state()
-end
-
-local function load_preset(slot)
-  recall_state(presets[slot])
-end
-
--- save/load patterns to disk
-local function save_patterns_to_disk()
-  local data = snapshot_state()
-  local dir = norns.state.data
-  -- ensure dir exists
-  os.execute("mkdir -p " .. dir)
-  local file = io.open(dir .. "patterns.lua", "w")
-  if file then
-    file:write("return " .. tab.serialize(data))
-    file:close()
-    print("terra: patterns saved to " .. dir .. "patterns.lua")
-  end
-end
-
-local function load_patterns_from_disk()
-  local dir = norns.state.data
-  local path = dir .. "patterns.lua"
-  local file = io.open(path, "r")
-  if file then
-    file:close()
-    local ok, data = pcall(dofile, path)
-    if ok and data then
-      recall_state(data)
-      print("terra: patterns loaded from " .. path)
-    end
-  end
-end
-
--- ============ SOFTCUT LOOPER ============
--- Records terra's output into a softcut buffer and plays it back
--- with speed/direction/grain manipulation
-
-local sc_loop = {
-  recording = false,
-  playing = false,
-  rate = 1.0,
-  level = 0.5,
-  loop_start = 0,
-  loop_end = 4,  -- seconds
-  rec_head = 0,
-  filter = 1.0,  -- 0=dark, 1=bright
-}
-
-local function softcut_init()
-  -- voice 1: record from input (terra's output goes to DAC which we can monitor)
-  -- voice 2: playback
-  softcut.buffer_clear()
-
-  -- playback voice
-  softcut.enable(1, 1)
-  softcut.buffer(1, 1)
-  softcut.level(1, sc_loop.level)
-  softcut.pan(1, 0)
-  softcut.rate(1, sc_loop.rate)
-  softcut.loop(1, 1)
-  softcut.loop_start(1, 0)
-  softcut.loop_end(1, sc_loop.loop_end)
-  softcut.position(1, 0)
-  softcut.play(1, 0)
-  softcut.pre_level(1, 0.8)
-  softcut.rec_level(1, 1)
-  softcut.rec(1, 0)
-  softcut.level_slew_time(1, 0.1)
-  softcut.rate_slew_time(1, 0.1)
-  softcut.post_filter_dry(1, 0.5)
-  softcut.post_filter_lp(1, 1.0)
-
-  -- record voice (monitors input)
-  softcut.enable(2, 1)
-  softcut.buffer(2, 1)
-  softcut.level(2, 0)  -- silent (just recording)
-  softcut.rate(2, 1)
-  softcut.loop(2, 1)
-  softcut.loop_start(2, 0)
-  softcut.loop_end(2, sc_loop.loop_end)
-  softcut.position(2, 0)
-  softcut.play(2, 1)
-  softcut.rec_level(2, 1)
-  softcut.pre_level(2, 0.6)  -- some overdub
-  softcut.rec(2, 0)
-  softcut.level_input_cut(1, 2, 1.0)  -- input 1 to record voice
-  softcut.level_input_cut(2, 2, 1.0)  -- input 2 to record voice
-end
-
-local function sc_start_record()
-  sc_loop.recording = true
-  softcut.rec(2, 1)
-  softcut.position(2, 0)
-end
-
-local function sc_stop_record()
-  sc_loop.recording = false
-  softcut.rec(2, 0)
-end
-
-local function sc_start_playback()
-  sc_loop.playing = true
-  softcut.level(1, sc_loop.level)
-  softcut.rate(1, sc_loop.rate)
-  softcut.play(1, 1)
-  softcut.position(1, 0)
-end
-
-local function sc_stop_playback()
-  sc_loop.playing = false
-  softcut.play(1, 0)
-  softcut.level(1, 0)
-end
-
-local function sc_set_rate(r)
-  sc_loop.rate = r
-  softcut.rate(1, r)
-end
-
-local function sc_set_level(l)
-  sc_loop.level = l
-  softcut.level(1, l)
-end
-
-local function sc_set_filter(f)
-  sc_loop.filter = f
-  softcut.post_filter_lp(1, f)
-  softcut.post_filter_dry(1, 1 - f * 0.5)
 end
 
 function cleanup()
