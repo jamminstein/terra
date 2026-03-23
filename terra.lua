@@ -535,22 +535,29 @@ local function apply_drum_preset(v, preset, blend)
 end
 
 -- pick a great drum sound: sometimes snap, sometimes blend
+-- only fires on SCATTER and DIALECT styles — the "curated" ones.
+-- MUTATE, RATCHET, GLITCH, SWAP let kick/snare roam freely via mutate_on_hit.
 local function drum_brain_hit(track)
-  if timbre.style < 6 then return end  -- only for per-hit styles
+  if track > 2 then return end  -- only kick and snare
+  -- drum brain only on SCATTER(7) and DIALECT(9) — styles that benefit from curated sounds
+  -- other per-hit styles (MUTATE, RATCHET, GLITCH, SWAP) let mutate_on_hit handle drums freely
+  if timbre.style ~= 7 and timbre.style ~= 9 then return end
+
   local int = timbre.intensity
   local v = voices[track]
 
+  -- even in curated styles, 30% chance to skip and let regular mutation handle it
+  if math.random() < 0.3 then return end
+
   if track == 1 then
-    -- KICK: pick from kick brain
-    if math.random() < 0.15 + int * 0.25 then
+    if math.random() < 0.15 + int * 0.2 then
       local entry = KICK_BRAIN[math.random(1, #KICK_BRAIN)]
       local preset = entry == "random" and random_kick() or entry
       local blend = math.random() < 0.3 * int and 1.0 or randf(0.2, 0.6) * int
       apply_drum_preset(v, preset, blend)
     end
   elseif track == 2 then
-    -- SNARE: pick from snare brain
-    if math.random() < 0.15 + int * 0.25 then
+    if math.random() < 0.15 + int * 0.2 then
       local entry = SNARE_BRAIN[math.random(1, #SNARE_BRAIN)]
       local preset = entry == "random" and random_snare() or entry
       local blend = math.random() < 0.3 * int and 1.0 or randf(0.2, 0.6) * int
