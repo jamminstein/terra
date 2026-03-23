@@ -102,7 +102,7 @@ end
 local function init_voice_presets()
   voices[1].mode = 1; voices[1].base_freq = 48; voices[1].decay = 0.4
   voices[1].pitch_env = 8; voices[1].pitch_decay = 0.04; voices[1].filter_freq = 2000
-  voices[1].pan = 0; voices[1].amp = 0.9
+  voices[1].pan = 0; voices[1].amp = 1.0
   voices[2].mode = 2; voices[2].base_freq = 72; voices[2].decay = 0.2
   voices[2].filter_freq = 5000; voices[2].filter_res = 0.4; voices[2].pan = -0.1
   voices[3].mode = 2; voices[3].base_freq = 100; voices[3].decay = 0.08
@@ -288,157 +288,198 @@ local function react_adjust()
 end
 
 -- ============ TIMBRE ENGINEER ============
--- Algorithmically sculpts voice timbres in real-time.
--- Styles: 1=SWEEP (slow LFO sweeps), 2=PUNCH (rhythmic stabs),
---         3=MORPH (glacial evolution), 4=GLITCH (abrupt random),
---         5=BREATHE (organic swell/recede)
+-- Aggressively explores the full synthesis engine in real-time.
+-- Every voice parameter is fair game: filter, decay, pitch env,
+-- FM index/ratio, partials, noise type, grain rate, ring mod,
+-- stereo spread, pan, amp, filter type, resonance.
 --
--- Each voice has an independent timbre engineer that can be on/off.
--- The engineer modulates: filter freq, filter res, decay, pitch env,
--- spread, pan, and amp — always within musical bounds.
+-- Styles:
+-- 1=SWEEP: LFO sweeps across ALL params (filter, decay, pitch, FM, pan)
+-- 2=PUNCH: rhythmic stabs — big on downbeats, tight on upbeats
+-- 3=MORPH: slow glacial drift toward random extreme targets
+-- 4=GLITCH: abrupt random jumps to extreme values, rapid-fire
+-- 5=BREATHE: organic multi-wave modulation across everything
 
 local TIMBRE_STYLES = {"off", "SWEEP", "PUNCH", "MORPH", "GLITCH", "BREATHE"}
 local timbre = {
-  style = 0,         -- global style (0=off, 1-5)
-  intensity = 0.5,   -- 0-1 how much to modulate
-  phase = {},        -- per-voice phase accumulator
-  target = {},       -- per-voice target values for MORPH
-  drunk = {},        -- per-voice drunk walk state for GLITCH
+  style = 0,
+  intensity = 0.5,
+  phase = {},
+  target = {},
 }
 for i = 1, NUM_VOICES do
-  timbre.phase[i] = math.random() * 2 * math.pi  -- randomize start phase
-  timbre.target[i] = { filter = 0, res = 0, decay = 0, spread = 0, pan = 0 }
-  timbre.drunk[i] = { filter = 0, res = 0, decay = 0, spread = 0, pan = 0 }
+  timbre.phase[i] = math.random() * 2 * math.pi
+  timbre.target[i] = {}
 end
 
--- clamp and apply a timbral offset to a voice param
-local function apply_timbre_offset(voice_idx, param, offset, lo, hi)
-  local v = voices[voice_idx]
-  -- offset is normalized -1..1, scale to range
-  local range = hi - lo
-  local base = v[param]
-  -- don't move the actual voice table, just compute the instantaneous value
-  return util.clamp(base + offset * range * timbre.intensity, lo, hi)
-end
+-- helper: random float
+local function randf(lo, hi) return lo + math.random() * (hi - lo) end
 
 local function timbre_engineer_step(step_num)
   if timbre.style == 0 then return end
 
+  local int = timbre.intensity
+
   for t = 1, NUM_VOICES do
     local v = voices[t]
     local phase = timbre.phase[t]
-    local int = timbre.intensity
 
     if timbre.style == 1 then
-      -- SWEEP: slow sinusoidal LFO sweeps on filter + decay
-      -- each voice has a different phase offset = stereo movement
-      timbre.phase[t] = phase + 0.02 + (t * 0.005)
-      local lfo = math.sin(timbre.phase[t])
-      local lfo2 = math.sin(timbre.phase[t] * 0.7 + 1.3)
+      -- SWEEP: multi-rate LFOs on every parameter
+      timbre.phase[t] = phase + 0.03 + (t * 0.007)
+      local p = timbre.phase[t]
 
+      -- filter: wide sweep from 80hz to 14khz
       v.filter_freq = util.clamp(
-        params:get("v" .. t .. "_filter") + lfo * 3000 * int,
-        60, 16000)
-      v.decay = util.clamp(
-        params:get("v" .. t .. "_decay") + lfo2 * 0.3 * int,
-        0.02, 1.5)
-      v.spread = util.clamp(
-        params:get("v" .. t .. "_spread") + math.sin(timbre.phase[t] * 0.3) * 0.4 * int,
-        0, 1)
+        util.linexp(math.sin(p) * 0.5 + 0.5, 0, 1, 80, 14000) * int +
+        v.filter_freq * (1 - int), 60, 16000)
+      -- resonance: subtle oscillation
+      v.filter_res = util.clamp(0.3 + math.sin(p * 1.3) * 0.35 * int, 0.05, 0.95)
+      -- decay: short to long
+      v.decay = util.clamp(0.05 + (math.sin(p * 0.6) * 0.5 + 0.5) * 0.8 * int, 0.02, 1.5)
+      -- pitch env: sweep from subtle to extreme
+      v.pitch_env = math.abs(math.sin(p * 0.4)) * 12 * int
+      v.pitch_decay = 0.02 + math.abs(math.sin(p * 0.7)) * 0.15 * int
+      -- stereo: pan sweeps, spread breathes
+      v.pan = util.clamp(math.sin(p * 0.5 + t * 1.2) * 0.8 * int, -1, 1)
+      v.spread = math.abs(math.sin(p * 0.3)) * int
+      -- detune: subtle wobble
+      v.detune = math.sin(p * 2.1) * 5 * int
 
     elseif timbre.style == 2 then
-      -- PUNCH: rhythmic parameter stabs synced to steps
-      -- filter opens on downbeats, closes on upbeats
-      local is_downbeat = step_num % 4 == 1
-      local is_offbeat = step_num % 4 == 3
-      local base_filter = params:get("v" .. t .. "_filter")
+      -- PUNCH: rhythmic parameter stabs synced to beat structure
+      local bar_pos = step_num % 16
+      local beat = step_num % 4
 
-      if is_downbeat then
-        v.filter_freq = util.clamp(base_filter * (1 + 1.5 * int), 60, 16000)
-        v.pitch_env = params:get("v" .. t .. "_penv") * (1 + int)
-      elseif is_offbeat then
-        v.filter_freq = util.clamp(base_filter * (1 - 0.3 * int), 60, 16000)
-      else
-        v.filter_freq = base_filter
+      if beat == 1 then
+        -- DOWNBEAT: open everything up, max energy
+        v.filter_freq = util.clamp(v.filter_freq * (1 + 2.0 * int), 60, 16000)
+        v.pitch_env = v.pitch_env + 6 * int
+        v.decay = util.clamp(v.decay * (1 + 0.5 * int), 0.02, 1.5)
+        v.filter_res = util.clamp(v.filter_res + 0.3 * int, 0.05, 0.95)
+        v.spread = util.clamp(v.spread + 0.4 * int, 0, 1)
+      elseif beat == 3 then
+        -- OFFBEAT: tighten and close down
+        v.filter_freq = util.clamp(v.filter_freq * (1 - 0.5 * int), 60, 16000)
+        v.pitch_env = math.max(0, v.pitch_env - 3 * int)
+        v.decay = util.clamp(v.decay * (1 - 0.3 * int), 0.02, 1.5)
       end
-      -- rhythmic pan (ping-pong between voices)
-      if t >= 3 then
-        local pp = (step_num % 8 < 4) and 1 or -1
-        v.pan = util.clamp(params:get("v" .. t .. "_pan") + pp * 0.3 * int, -1, 1)
+      -- every 4 bars: change filter type for a voice
+      if bar_pos == 0 and math.random() < 0.3 * int then
+        v.filter_type = math.random(0, 2)
+      end
+      -- rhythmic pan: alternate L/R per beat
+      if t >= 2 then
+        local pp = (beat < 2) and 1 or -1
+        v.pan = util.clamp(v.pan + pp * 0.5 * int, -1, 1)
       end
 
     elseif timbre.style == 3 then
-      -- MORPH: glacial evolution toward random targets
-      -- targets change every ~32 steps
-      if step_num % 32 == (t * 5) % 32 then
-        timbre.target[t].filter = (math.random() - 0.5) * 2
-        timbre.target[t].res = (math.random() - 0.5) * 2
-        timbre.target[t].decay = (math.random() - 0.5) * 2
-        timbre.target[t].spread = math.random()
-        timbre.target[t].pan = (math.random() - 0.5) * 2
+      -- MORPH: glacial drift toward extreme random targets
+      -- new targets every 16-48 steps (varies per voice)
+      local interval = 16 + (t * 7) % 32
+      if step_num % interval == 0 then
+        timbre.target[t] = {
+          filter = randf(80, 16000),
+          res = randf(0.05, 0.95),
+          decay = randf(0.02, 1.2),
+          pitch_env = randf(0, 14),
+          pitch_decay = randf(0.005, 0.2),
+          spread = randf(0, 1),
+          pan = randf(-1, 1),
+          detune = randf(-8, 8),
+          filter_type = math.random(0, 2),
+        }
       end
       -- slew toward targets
       local tgt = timbre.target[t]
-      local slew = 0.03
-      v.filter_freq = util.clamp(
-        v.filter_freq + (params:get("v" .. t .. "_filter") + tgt.filter * 4000 * int - v.filter_freq) * slew,
-        60, 16000)
-      v.filter_res = util.clamp(
-        v.filter_res + (params:get("v" .. t .. "_res") + tgt.res * 0.3 * int - v.filter_res) * slew,
-        0.05, 0.95)
-      v.decay = util.clamp(
-        v.decay + (params:get("v" .. t .. "_decay") + tgt.decay * 0.4 * int - v.decay) * slew,
-        0.02, 1.5)
-      v.spread = util.clamp(
-        v.spread + (tgt.spread * int - v.spread) * slew,
-        0, 1)
+      if tgt and tgt.filter then
+        local slew = 0.04 * int
+        v.filter_freq = v.filter_freq + (tgt.filter - v.filter_freq) * slew
+        v.filter_res = v.filter_res + (tgt.res - v.filter_res) * slew
+        v.decay = v.decay + (tgt.decay - v.decay) * slew
+        v.pitch_env = v.pitch_env + (tgt.pitch_env - v.pitch_env) * slew
+        v.pitch_decay = v.pitch_decay + (tgt.pitch_decay - v.pitch_decay) * slew
+        v.spread = v.spread + (tgt.spread - v.spread) * slew
+        v.pan = v.pan + (tgt.pan - v.pan) * slew
+        v.detune = v.detune + (tgt.detune - v.detune) * slew
+        -- occasionally snap filter type (discrete)
+        if math.random() < 0.02 * int then
+          v.filter_type = tgt.filter_type
+        end
+      end
 
     elseif timbre.style == 4 then
-      -- GLITCH: abrupt random changes, some steps get wild values
-      -- 15% chance per step to glitch a random parameter
-      if math.random() < 0.15 * int then
-        local which = math.random(1, 5)
-        if which == 1 then
-          v.filter_freq = util.clamp(
-            params:get("v" .. t .. "_filter") * (0.3 + math.random() * 2.5),
-            60, 16000)
-        elseif which == 2 then
-          v.decay = util.clamp(math.random() * 0.8 + 0.02, 0.02, 1.5)
-        elseif which == 3 then
-          v.filter_res = util.clamp(math.random() * 0.8 + 0.05, 0.05, 0.95)
-        elseif which == 4 then
-          v.pitch_env = math.random() * 10 * int
-        elseif which == 5 then
-          v.pan = util.clamp((math.random() - 0.5) * 2 * int, -1, 1)
+      -- GLITCH: aggressive random jumps — the chaos engine
+      -- 25% chance per voice per step to glitch multiple params
+      if math.random() < 0.25 * int then
+        -- how many params to hit (1-4)
+        local hits = math.random(1, math.floor(3 * int) + 1)
+        for _ = 1, hits do
+          local which = math.random(1, 10)
+          if which == 1 then
+            v.filter_freq = randf(60, 16000)
+          elseif which == 2 then
+            v.decay = randf(0.01, 1.0)
+          elseif which == 3 then
+            v.filter_res = randf(0.05, 0.95)
+          elseif which == 4 then
+            v.pitch_env = randf(0, 16)
+          elseif which == 5 then
+            v.pitch_decay = randf(0.003, 0.3)
+          elseif which == 6 then
+            v.pan = randf(-1, 1)
+          elseif which == 7 then
+            v.spread = randf(0, 1)
+          elseif which == 8 then
+            v.detune = randf(-10, 10)
+          elseif which == 9 then
+            v.filter_type = math.random(0, 2)
+          elseif which == 10 then
+            v.amp = util.clamp(randf(0.3, 1.0), 0.1, 1.0)
+          end
         end
       else
-        -- snap back toward base values (partial recovery)
-        v.filter_freq = v.filter_freq + (params:get("v" .. t .. "_filter") - v.filter_freq) * 0.2
-        v.decay = v.decay + (params:get("v" .. t .. "_decay") - v.decay) * 0.2
+        -- 30% chance to snap back toward base (creates contrast)
+        if math.random() < 0.3 then
+          v.filter_freq = v.filter_freq * 0.8 + params:get("v" .. t .. "_filter") * 0.2
+          v.decay = v.decay * 0.8 + params:get("v" .. t .. "_decay") * 0.2
+          v.pitch_env = v.pitch_env * 0.7 + params:get("v" .. t .. "_penv") * 0.3
+        end
       end
 
     elseif timbre.style == 5 then
-      -- BREATHE: organic swell and recede, like a living instrument
-      -- uses combined sine waves at different rates for organic movement
-      timbre.phase[t] = phase + 0.008 + (t * 0.003)
-      local breath = math.sin(timbre.phase[t]) * 0.5 + math.sin(timbre.phase[t] * 2.3) * 0.3
-      local breath2 = math.cos(timbre.phase[t] * 0.6 + t) * 0.4
+      -- BREATHE: organic multi-wave modulation — EVERYTHING moves
+      timbre.phase[t] = phase + 0.012 + (t * 0.004)
+      local p = timbre.phase[t]
+      -- layered sine waves at irrational ratios for organic movement
+      local wave1 = math.sin(p)
+      local wave2 = math.sin(p * 1.618)  -- golden ratio
+      local wave3 = math.cos(p * 0.618)
+      local wave4 = math.sin(p * 2.718 + t)  -- e
+      local combined = (wave1 + wave2 * 0.7 + wave3 * 0.5) / 2.2
 
       v.filter_freq = util.clamp(
-        params:get("v" .. t .. "_filter") * (1 + breath * int),
+        util.linexp(combined * 0.5 + 0.5, 0, 1, 100, 14000) * int +
+        params:get("v" .. t .. "_filter") * (1 - int),
         60, 16000)
+      v.filter_res = util.clamp(
+        0.3 + wave2 * 0.35 * int, 0.05, 0.95)
       v.decay = util.clamp(
-        params:get("v" .. t .. "_decay") * (1 + breath2 * 0.5 * int),
+        params:get("v" .. t .. "_decay") * (1 + combined * 0.6 * int),
         0.02, 1.5)
-      v.amp = util.clamp(
-        params:get("v" .. t .. "_amp") * (1 + breath * 0.2 * int),
-        0.1, 1.0)
-      v.spread = util.clamp(
-        params:get("v" .. t .. "_spread") + math.sin(timbre.phase[t] * 0.4) * 0.3 * int,
-        0, 1)
+      v.pitch_env = math.max(0, params:get("v" .. t .. "_penv") + wave3 * 6 * int)
+      v.pitch_decay = util.clamp(0.03 + math.abs(wave4) * 0.15 * int, 0.003, 0.3)
+      v.spread = util.clamp(math.abs(wave1) * int, 0, 1)
       v.pan = util.clamp(
-        params:get("v" .. t .. "_pan") + math.sin(timbre.phase[t] * 0.5 + t * 0.8) * 0.25 * int,
-        -1, 1)
+        params:get("v" .. t .. "_pan") + wave4 * 0.6 * int, -1, 1)
+      v.detune = wave2 * 6 * int
+      v.amp = util.clamp(
+        params:get("v" .. t .. "_amp") * (1 + wave3 * 0.15 * int), 0.1, 1.0)
+      -- occasional filter type shifts
+      if math.random() < 0.01 * int then
+        v.filter_type = math.random(0, 2)
+      end
     end
   end
 end
@@ -553,13 +594,22 @@ local function advance_step()
   grid_redraw()
 end
 
+local function stop_sequence()
+  playing = false
+  if clock_id then
+    clock.cancel(clock_id)
+    clock_id = nil
+  end
+end
+
 local function start_sequence()
+  -- prevent duplicate clocks
+  if clock_id then stop_sequence() end
   playing = true
   step = 0
   clock_id = clock.run(function()
     while true do
       clock.sync(1/4)
-      -- swing: delay even steps slightly
       if swing_amt > 0 and step % 2 == 0 then
         clock.sleep((swing_amt / 100) * (60 / clock.get_tempo() / 4))
       end
@@ -571,11 +621,6 @@ local function start_sequence()
       end
     end
   end)
-end
-
-local function stop_sequence()
-  playing = false
-  if clock_id then clock.cancel(clock_id); clock_id = nil end
 end
 
 -- ============ PARAMS ============

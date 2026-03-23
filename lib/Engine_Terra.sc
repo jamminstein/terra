@@ -13,11 +13,12 @@ Engine_Terra : CroneEngine {
     var pg;
     var fxGroup;
     var duckGroup;
-    var voiceSynths;  // array of 6 active synths
+    var voiceSynths;
     var fxBus;
     var fx1Synth, fx2Synth, fx3Synth;
     var duckSynth;
-    var duckBus;  // control bus for duck envelope
+    var duckBus;
+    var duckEnvSynth;
 
     *new { arg context, doneCallback;
         ^super.new(context, doneCallback);
@@ -47,45 +48,35 @@ Engine_Terra : CroneEngine {
                 spread=0.3;
 
             var sig, env, pitchEnv, modulator;
-            var partials, amps, phases;
+            var amps;
             var sigL, sigR;
 
-            // pitch envelope (percussive sweep)
-            pitchEnv = EnvGen.kr(
-                Env.perc(0.001, pitchDecay, pitchEnvAmt, -8)
-            );
+            pitchEnv = EnvGen.kr(Env.perc(0.001, pitchDecay, pitchEnvAmt, -8));
             freq = freq * (1 + pitchEnv);
 
-            // FM modulator
             modulator = SinOsc.ar(freq * fmRatio) * fmIndex * freq;
 
-            // 7 partials based on harmonic series (Nymira-style)
             amps = [partial1, partial2, partial3, partial4, partial5, partial6, partial7];
-            partials = Array.fill(7, { arg i;
-                var ratio = i + 1;
-                SinOsc.ar(freq * ratio + modulator, 0, amps[i])
+            sig = Mix.fill(7, { arg i;
+                SinOsc.ar(freq * (i + 1) + modulator, 0, amps[i])
             });
-            sig = Mix.new(partials);
+            // normalize: divide by sum of partial amps, then boost
+            sig = sig * 1.5 / amps.sum.max(0.1);
 
-            // amp envelope
-            env = EnvGen.kr(
-                Env.perc(attack, decay, 1, curve),
-                doneAction: Done.freeSelf
-            );
+            env = EnvGen.kr(Env.perc(attack, decay, 1, curve), doneAction: Done.freeSelf);
 
-            // multi-mode filter (DMNO-inspired: 0=LP, 1=HP, 2=BP)
             sig = Select.ar(filterType, [
-                RLPF.ar(sig, filterFreq.clip(40, 18000), filterRes.max(0.1)),
-                RHPF.ar(sig, filterFreq.clip(40, 18000), filterRes.max(0.1)),
-                BPF.ar(sig, filterFreq.clip(40, 18000), filterRes.max(0.1)) * 2
+                RLPF.ar(sig, filterFreq.clip(40, 18000), filterRes.linlin(0, 1, 1, 0.05)),
+                RHPF.ar(sig, filterFreq.clip(40, 18000), filterRes.linlin(0, 1, 1, 0.05)),
+                BPF.ar(sig, filterFreq.clip(40, 18000), filterRes.linlin(0, 1, 1, 0.05)) * 3
             ]);
 
             sig = sig * env * amp;
 
-            // binaural stereo (DMNO-inspired de-phasing)
             sigL = DelayN.ar(sig, 0.01, spread * 0.005);
-            sigR = DelayN.ar(sig, 0.01, spread * 0.003 + (detune * 0.001));
-            sig = Pan2.ar(sig, pan) + [sigL * (1 - pan.abs) * spread * 0.3, sigR * (1 - pan.abs) * spread * 0.3];
+            sigR = DelayN.ar(sig, 0.01, spread * 0.003 + (detune.abs * 0.001));
+            sig = Pan2.ar(sig, pan) + [sigL * spread * 0.4, sigR * spread * 0.4];
+            sig = LeakDC.ar(sig);
 
             Out.ar(out, sig);
         }).add;
@@ -104,13 +95,9 @@ Engine_Terra : CroneEngine {
             var sig, osc, noise, env, pitchEnv, filterEnv;
             var sigL, sigR;
 
-            // pitch envelope
-            pitchEnv = EnvGen.kr(
-                Env.perc(0.001, pitchDecay, pitchEnvAmt, -8)
-            );
+            pitchEnv = EnvGen.kr(Env.perc(0.001, pitchDecay, pitchEnvAmt, -8));
             freq = freq * (1 + pitchEnv);
 
-            // oscillator shape: 0=sine, 0.33=tri, 0.66=saw, 1=pulse
             osc = SelectX.ar(shape * 3, [
                 SinOsc.ar(freq + (detune * 0.5)),
                 LFTri.ar(freq + (detune * 0.5)),
@@ -118,33 +105,24 @@ Engine_Terra : CroneEngine {
                 Pulse.ar(freq + (detune * 0.5), pulseWidth)
             ]);
 
-            // noise layer (transient)
             noise = WhiteNoise.ar * EnvGen.kr(Env.perc(0.001, noiseDecay, 1, -8));
             sig = osc + (noise * noiseAmt);
 
-            // filter envelope
-            filterEnv = EnvGen.kr(
-                Env.perc(0.001, filterDecay, filterEnvAmt, -6)
-            );
+            filterEnv = EnvGen.kr(Env.perc(0.001, filterDecay, filterEnvAmt, -6));
 
-            // multi-mode filter
             sig = Select.ar(filterType, [
-                RLPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.max(0.1)),
-                RHPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.max(0.1)),
-                BPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.max(0.1)) * 2
+                RLPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.linlin(0, 1, 1, 0.05)),
+                RHPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.linlin(0, 1, 1, 0.05)),
+                BPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.linlin(0, 1, 1, 0.05)) * 3
             ]);
 
-            // amp envelope
-            env = EnvGen.kr(
-                Env.perc(attack, decay, 1, curve),
-                doneAction: Done.freeSelf
-            );
-            sig = sig * env * amp;
+            env = EnvGen.kr(Env.perc(attack, decay, 1, curve), doneAction: Done.freeSelf);
+            sig = sig * env * amp * 1.5;  // volume boost
 
-            // binaural stereo
             sigL = DelayN.ar(sig, 0.01, spread * 0.004);
             sigR = DelayN.ar(sig, 0.01, spread * 0.002 + (detune.abs * 0.0005));
-            sig = Pan2.ar(sig, pan) + [sigL * (1 - pan.abs) * spread * 0.3, sigR * (1 - pan.abs) * spread * 0.3];
+            sig = Pan2.ar(sig, pan) + [sigL * spread * 0.4, sigR * spread * 0.4];
+            sig = LeakDC.ar(sig);
 
             Out.ar(out, sig);
         }).add;
@@ -153,7 +131,7 @@ Engine_Terra : CroneEngine {
         SynthDef(\tf_noise, {
             arg out, freq=200, amp=0.5, pan=0, detune=0,
                 noiseType=0, crackle=0.5,
-                grainRate=20, grainDur=0.02,
+                grainRate=40, grainDur=0.03,
                 pitchEnvAmt=0, pitchDecay=0.05,
                 attack=0.001, decay=0.3, curve=(-6),
                 filterFreq=3000, filterRes=0.8, filterType=0,
@@ -164,46 +142,36 @@ Engine_Terra : CroneEngine {
             var sig, env, filterEnv, ring;
             var sigL, sigR;
 
-            // noise source: 0=white, 0.5=pink, 1=crackle/dust
             sig = SelectX.ar(noiseType * 2, [
                 WhiteNoise.ar,
                 PinkNoise.ar,
-                Crackle.ar(crackle.linlin(0, 1, 1.0, 2.0)) + Dust.ar(grainRate * 10) * 0.3
+                Crackle.ar(crackle.linlin(0, 1, 1.0, 2.0)) + Dust2.ar(grainRate * 10) * 0.5
             ]);
 
-            // granular gating
-            sig = sig * LFPulse.ar(grainRate, 0, grainDur * grainRate);
+            // granular gating (wider pulses for more volume)
+            sig = sig * LFPulse.ar(grainRate.max(1), 0, (grainDur * grainRate.max(1)).clip(0.1, 0.95));
 
-            // pitched resonance via comb filter (tuned to freq)
-            sig = sig + CombL.ar(sig, 0.05, (1/freq.max(20)).min(0.05), 0.05) * 0.5;
+            // pitched resonance
+            sig = sig + CombL.ar(sig, 0.05, (1/freq.max(20)).min(0.05), 0.08) * 0.6;
 
-            // filter envelope
-            filterEnv = EnvGen.kr(
-                Env.perc(0.001, filterDecay, filterEnvAmt, -6)
-            );
+            filterEnv = EnvGen.kr(Env.perc(0.001, filterDecay, filterEnvAmt, -6));
 
-            // multi-mode filter
             sig = Select.ar(filterType, [
-                RLPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.max(0.05)),
-                RHPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.max(0.05)),
-                BPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.max(0.05)) * 3
+                RLPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.linlin(0, 1, 1, 0.03)),
+                RHPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.linlin(0, 1, 1, 0.03)),
+                BPF.ar(sig, (filterFreq + filterEnv).clip(40, 18000), filterRes.linlin(0, 1, 1, 0.03)) * 4
             ]);
 
-            // ring modulation (optional harmonic content)
             ring = SinOsc.ar(ringFreq.max(1));
             sig = (sig * (1 - ringAmt)) + (sig * ring * ringAmt);
 
-            // amp envelope
-            env = EnvGen.kr(
-                Env.perc(attack, decay, 1, curve),
-                doneAction: Done.freeSelf
-            );
-            sig = sig * env * amp;
+            env = EnvGen.kr(Env.perc(attack, decay, 1, curve), doneAction: Done.freeSelf);
+            sig = sig * env * amp * 2.0;  // volume boost (noise is inherently quieter)
 
-            // binaural stereo
             sigL = DelayN.ar(sig, 0.01, spread * 0.006);
             sigR = DelayN.ar(sig, 0.01, spread * 0.001);
-            sig = Pan2.ar(sig, pan) + [sigL * (1 - pan.abs) * spread * 0.3, sigR * (1 - pan.abs) * spread * 0.3];
+            sig = Pan2.ar(sig, pan) + [sigL * spread * 0.4, sigR * spread * 0.4];
+            sig = LeakDC.ar(sig);
 
             Out.ar(out, sig);
         }).add;
@@ -211,59 +179,51 @@ Engine_Terra : CroneEngine {
 
         // ======== FX SYNTHDEFS (Esu's Trifecta-inspired) ========
 
-        // --- FX: Bypass (default) ---
         SynthDef(\tf_fx_bypass, {
             arg bus;
-            var sig = In.ar(bus, 2);
-            ReplaceOut.ar(bus, sig);
+            ReplaceOut.ar(bus, In.ar(bus, 2));
         }).add;
 
-        // --- FX: Delay (clock-syncable tape delay) ---
         SynthDef(\tf_fx_delay, {
             arg bus, time=0.3, feedback=0.4, mix=0.3, color=0.5;
             var sig, wet, fb;
             sig = In.ar(bus, 2);
             fb = LocalIn.ar(2) * feedback;
             fb = LPF.ar(fb, color.linexp(0, 1, 600, 12000));
-            fb = fb.tanh;  // warm saturation
+            fb = fb.tanh;
             wet = DelayC.ar(sig + fb, 2.0, time.clip(0.001, 2.0));
             LocalOut.ar(wet);
             ReplaceOut.ar(bus, (sig * (1 - mix)) + (wet * mix));
         }).add;
 
-        // --- FX: Reverb/Shimmer ---
         SynthDef(\tf_fx_reverb, {
             arg bus, size=0.7, decayTime=0.5, mix=0.25, shimmer=0;
             var sig, wet;
             sig = In.ar(bus, 2);
             wet = FreeVerb2.ar(sig[0], sig[1], 1.0, size, 0.5);
-            // shimmer: pitch-shifted feedback into reverb
             wet = wet + (PitchShift.ar(wet, 0.2, 2.0, 0, 0.01) * shimmer * 0.3);
             wet = LPF.ar(wet, 12000);
             ReplaceOut.ar(bus, (sig * (1 - mix)) + (wet * mix));
         }).add;
 
-        // --- FX: Filter Sweep ---
         SynthDef(\tf_fx_filter, {
             arg bus, freq=2000, res=0.5, mix=1.0, lfoRate=0.1;
             var sig, wet, lfo;
             sig = In.ar(bus, 2);
             lfo = SinOsc.kr(lfoRate).range(0.5, 2.0);
-            wet = RLPF.ar(sig, (freq * lfo).clip(40, 18000), res.max(0.1));
+            wet = RLPF.ar(sig, (freq * lfo).clip(40, 18000), res.linlin(0, 1, 1, 0.05));
             ReplaceOut.ar(bus, (sig * (1 - mix)) + (wet * mix));
         }).add;
 
-        // --- FX: Bitcrush ---
         SynthDef(\tf_fx_crush, {
             arg bus, bits=12, rate=44100, mix=0.5, drive=0;
             var sig, wet;
             sig = In.ar(bus, 2);
             wet = Decimator.ar(sig, rate, bits);
-            wet = (wet * (1 + (drive * 8))).tanh;  // drive into saturation
+            wet = (wet * (1 + (drive * 8))).tanh;
             ReplaceOut.ar(bus, (sig * (1 - mix)) + (wet * mix));
         }).add;
 
-        // --- FX: Ring Mod ---
         SynthDef(\tf_fx_ring, {
             arg bus, freq=200, depth=0.5, mix=0.5, lfoRate=0;
             var sig, wet, mod;
@@ -273,22 +233,20 @@ Engine_Terra : CroneEngine {
             ReplaceOut.ar(bus, (sig * (1 - mix)) + (wet * mix));
         }).add;
 
-        // --- FX: Chorus ---
         SynthDef(\tf_fx_chorus, {
-            arg bus, rate=0.5, depth=0.003, mix=0.4, voices=3;
+            arg bus, rate=0.5, depth=0.003, mix=0.4;
             var sig, wet;
             sig = In.ar(bus, 2);
             wet = Mix.fill(3, { arg i;
                 var r = rate * (1 + (i * 0.1));
                 var d = depth * (1 + (i * 0.3));
-                DelayC.ar(sig, 0.05, SinOsc.kr(r, i * 1.2).range(0.001, d) + 0.003)
+                DelayC.ar(sig, 0.05, SinOsc.kr(r, i * 1.2).range(0.001, d.max(0.002)) + 0.003)
             }) / 3;
             ReplaceOut.ar(bus, (sig * (1 - mix)) + (wet * mix));
         }).add;
 
-        // --- FX: Phaser ---
         SynthDef(\tf_fx_phaser, {
-            arg bus, rate=0.3, depth=0.7, mix=0.5, stages=4;
+            arg bus, rate=0.3, depth=0.7, mix=0.5;
             var sig, wet, mod;
             sig = In.ar(bus, 2);
             mod = SinOsc.kr(rate).range(200, 4000);
@@ -299,18 +257,16 @@ Engine_Terra : CroneEngine {
             ReplaceOut.ar(bus, (sig * (1 - mix)) + (wet * mix * depth));
         }).add;
 
-        // ======== DUCK / SIDECHAIN (Trifecta-inspired) ========
+        // ======== DUCK / SIDECHAIN ========
         SynthDef(\tf_duck, {
             arg bus, duckAmt=0, duckDecay=0.15, duckIn;
             var sig, duckEnv;
             sig = In.ar(bus, 2);
             duckEnv = In.kr(duckIn, 1);
-            // invert envelope: 1 when no duck, drops to (1-duckAmt) on trigger
             sig = sig * (1 - (duckEnv * duckAmt));
             ReplaceOut.ar(bus, sig);
         }).add;
 
-        // duck trigger (receives trigger from Lua, outputs envelope on control bus)
         SynthDef(\tf_duck_env, {
             arg out, decay=0.15;
             var trig, env;
@@ -319,36 +275,31 @@ Engine_Terra : CroneEngine {
             Out.kr(out, env);
         }).add;
 
-        context.server.sync;
-
-        // ======== STARTUP ========
-
-        // duck envelope generator
-        Synth(\tf_duck_env, [\out, duckBus, \decay, 0.15], pg);
-
-        // start FX chain (all bypass initially) on context.out_b
-        // voices write to fxBus, then we copy fxBus -> out and apply fx in series
-        fx1Synth = Synth(\tf_fx_bypass, [\bus, context.out_b], fxGroup);
-        fx2Synth = Synth.after(fx1Synth, \tf_fx_bypass, [\bus, context.out_b]);
-        fx3Synth = Synth.after(fx2Synth, \tf_fx_bypass, [\bus, context.out_b]);
-
-        // duck synth at end of chain
-        duckSynth = Synth(\tf_duck, [\bus, context.out_b, \duckAmt, 0, \duckIn, duckBus], duckGroup);
-
-        // bus routing synth: copy fxBus to output
+        // bus copy
         SynthDef(\tf_bus_copy, {
             arg in, out;
-            var sig = In.ar(in, 2);
-            Out.ar(out, sig);
+            Out.ar(out, In.ar(in, 2));
         }).add;
 
         context.server.sync;
 
-        Synth(\tf_bus_copy, [\in, fxBus, \out, context.out_b], fxGroup, \addBefore);
+        // ======== STARTUP ========
+
+        duckEnvSynth = Synth(\tf_duck_env, [\out, duckBus, \decay, 0.15], pg);
+
+        // bus copy at head of fx chain
+        Synth(\tf_bus_copy, [\in, fxBus, \out, context.out_b], fxGroup, \addToHead);
+
+        context.server.sync;
+
+        fx1Synth = Synth(\tf_fx_bypass, [\bus, context.out_b], fxGroup, \addToTail);
+        fx2Synth = Synth.after(fx1Synth, \tf_fx_bypass, [\bus, context.out_b]);
+        fx3Synth = Synth.after(fx2Synth, \tf_fx_bypass, [\bus, context.out_b]);
+
+        duckSynth = Synth(\tf_duck, [\bus, context.out_b, \duckAmt, 0, \duckIn, duckBus], duckGroup);
 
         // ======== COMMANDS ========
 
-        // --- Voice trigger (mode 0=FM, 1=Sub, 2=Noise) ---
         this.addCommand("trig", "iifff", { arg msg;
             var voice = msg[1].asInteger.clip(0, 5);
             var mode = msg[2].asInteger.clip(0, 2);
@@ -357,7 +308,6 @@ Engine_Terra : CroneEngine {
             var pan = msg[5].asFloat;
             var synthName;
 
-            // free previous if still playing
             if(voiceSynths[voice].notNil, {
                 voiceSynths[voice].free;
                 voiceSynths[voice] = nil;
@@ -369,7 +319,6 @@ Engine_Terra : CroneEngine {
             ], pg);
         });
 
-        // --- Per-voice parameter set ---
         this.addCommand("voice_param", "isf", { arg msg;
             var voice = msg[1].asInteger.clip(0, 5);
             var param = msg[2].asString.asSymbol;
@@ -379,7 +328,6 @@ Engine_Terra : CroneEngine {
             });
         });
 
-        // --- Trigger with full params (for per-step variation) ---
         this.addCommand("trig_full", "iifffffffffff", { arg msg;
             var voice = msg[1].asInteger.clip(0, 5);
             var mode = msg[2].asInteger.clip(0, 2);
@@ -411,10 +359,49 @@ Engine_Terra : CroneEngine {
             ], pg);
         });
 
-        // --- Duck trigger ---
+        // extended trigger with FM/Sub/Noise specific params
+        this.addCommand("trig_ext", "iiffffffffffffff", { arg msg;
+            var voice = msg[1].asInteger.clip(0, 5);
+            var mode = msg[2].asInteger.clip(0, 2);
+            var freq = msg[3].asFloat;
+            var amp = msg[4].asFloat;
+            var pan = msg[5].asFloat;
+            var decay = msg[6].asFloat;
+            var filterFreq = msg[7].asFloat;
+            var filterRes = msg[8].asFloat;
+            var filterType = msg[9].asFloat;
+            var pitchEnvAmt = msg[10].asFloat;
+            var pitchDecay = msg[11].asFloat;
+            var spread = msg[12].asFloat;
+            var detune = msg[13].asFloat;
+            var extra1 = msg[14].asFloat;  // FM: fmIndex | Sub: shape | Noise: noiseType
+            var extra2 = msg[15].asFloat;  // FM: fmRatio | Sub: noiseAmt | Noise: grainRate
+            var extra3 = msg[16].asFloat;  // FM: (unused) | Sub: filterEnvAmt | Noise: ringAmt
+            var synthName, extraArgs;
+
+            if(voiceSynths[voice].notNil, {
+                voiceSynths[voice].free;
+                voiceSynths[voice] = nil;
+            });
+
+            synthName = [\tf_fm, \tf_sub, \tf_noise][mode];
+
+            extraArgs = case
+            { mode == 0 } { [\fmIndex, extra1, \fmRatio, extra2] }
+            { mode == 1 } { [\shape, extra1, \noiseAmt, extra2, \filterEnvAmt, extra3] }
+            { mode == 2 } { [\noiseType, extra1, \grainRate, extra2, \ringAmt, extra3] };
+
+            voiceSynths[voice] = Synth(synthName, [
+                \out, fxBus, \freq, freq, \amp, amp, \pan, pan,
+                \decay, decay, \filterFreq, filterFreq, \filterRes, filterRes,
+                \filterType, filterType.asInteger,
+                \pitchEnvAmt, pitchEnvAmt, \pitchDecay, pitchDecay,
+                \spread, spread, \detune, detune
+            ] ++ (extraArgs ? []), pg);
+        });
+
         this.addCommand("duck_trig", "", { arg msg;
-            // trigger the duck envelope
-            pg.set(\trig, 1);
+            duckEnvSynth.set(\trig, 1);
         });
 
         this.addCommand("duck_amt", "f", { arg msg;
@@ -422,11 +409,9 @@ Engine_Terra : CroneEngine {
         });
         this.addCommand("duck_decay", "f", { arg msg;
             duckSynth.set(\duckDecay, msg[1].asFloat);
-            pg.set(\decay, msg[1].asFloat);
+            duckEnvSynth.set(\decay, msg[1].asFloat);
         });
 
-        // --- FX slot assignment ---
-        // slot: 0-2, type: 0=bypass, 1=delay, 2=reverb, 3=filter, 4=crush, 5=ring, 6=chorus, 7=phaser
         this.addCommand("fx_set", "ii", { arg msg;
             var slot = msg[1].asInteger.clip(0, 2);
             var fxType = msg[2].asInteger.clip(0, 7);
@@ -452,7 +437,6 @@ Engine_Terra : CroneEngine {
             };
         });
 
-        // --- FX parameter ---
         this.addCommand("fx_param", "isf", { arg msg;
             var slot = msg[1].asInteger.clip(0, 2);
             var param = msg[2].asString.asSymbol;
@@ -463,7 +447,6 @@ Engine_Terra : CroneEngine {
             { slot == 2 } { fx3Synth.set(param, val) };
         });
 
-        // --- FM partial levels (for voice tuning) ---
         this.addCommand("partials", "ifffffff", { arg msg;
             var voice = msg[1].asInteger.clip(0, 5);
             if(voiceSynths[voice].notNil, {
@@ -486,6 +469,7 @@ Engine_Terra : CroneEngine {
         fx2Synth.free;
         fx3Synth.free;
         duckSynth.free;
+        duckEnvSynth.free;
         fxBus.free;
         duckBus.free;
     }
