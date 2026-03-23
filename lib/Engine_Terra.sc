@@ -281,6 +281,22 @@ Engine_Terra : CroneEngine {
             Out.ar(out, In.ar(in, 2));
         }).add;
 
+        // output limiter/compressor — final stage
+        SynthDef(\tf_output, {
+            arg bus, threshold=0.6, ratio=4, makeup=1.2;
+            var sig, compressed;
+            sig = In.ar(bus, 2);
+            compressed = Compander.ar(sig, sig,
+                thresh: threshold,
+                slopeBelow: 1,
+                slopeAbove: 1/ratio,
+                clampTime: 0.002,
+                relaxTime: 0.08
+            );
+            compressed = Limiter.ar(compressed * makeup, 0.95, 0.005);
+            ReplaceOut.ar(bus, compressed);
+        }).add;
+
         context.server.sync;
 
         // ======== STARTUP ========
@@ -297,6 +313,9 @@ Engine_Terra : CroneEngine {
         fx3Synth = Synth.after(fx2Synth, \tf_fx_bypass, [\bus, context.out_b]);
 
         duckSynth = Synth(\tf_duck, [\bus, context.out_b, \duckAmt, 0, \duckIn, duckBus], duckGroup);
+
+        // output compressor/limiter — always last in chain
+        Synth.after(duckSynth, \tf_output, [\bus, context.out_b]);
 
         // ======== COMMANDS ========
 
