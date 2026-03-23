@@ -62,6 +62,8 @@ local clipboard = nil  -- {pattern, prob, vel}
 
 -- midi
 local midi_out = nil
+local opxy_out = nil
+local midi_in_device = nil
 
 -- voice names for display
 local VOICE_NAMES = {"KICK", "SNARE", "HAT", "PERC", "TONE", "FX"}
@@ -557,17 +559,132 @@ local function trigger_voice(track, velocity)
     v.pitch_env, v.pitch_decay, v.spread, v.detune
   )
   if track == 1 and duck_amt > 0 then engine.duck_trig() end
-  -- flash for grid
   flash[track] = 8
+
   -- MIDI out
+  local midi_vel = math.floor(velocity * 127)
+  local is_drum = track <= 3
+  local midi_ch = is_drum and params:get("midi_drum_ch") or params:get("midi_melody_ch")
+  local midi_note = v.midi_note
+
+  -- for pitched voices, send the actual tuned note
+  if track >= 4 then
+    midi_note = freq  -- freq is already a MIDI note number at this point
+  end
+
   if midi_out then
-    midi_out:note_on(v.midi_note, math.floor(velocity * 127), v.midi_ch)
+    midi_out:note_on(midi_note, midi_vel, midi_ch)
     clock.run(function()
-      clock.sleep(v.decay * 0.5)
-      midi_out:note_off(v.midi_note, 0, v.midi_ch)
+      clock.sleep(v.decay * 0.8)
+      midi_out:note_off(midi_note, 0, midi_ch)
     end)
   end
+
+  -- OP-XY out (separate device + channels)
+  if opxy_out then
+    local opxy_ch = is_drum and params:get("opxy_drum_ch") or params:get("opxy_melody_ch")
+    opxy_out:note_on(midi_note, midi_vel, opxy_ch)
+    clock.run(function()
+      clock.sleep(v.decay * 0.8)
+      opxy_out:note_off(midi_note, 0, opxy_ch)
+    end)
+  end
+
   recent_density[track] = 1
+end
+
+-- ============ OP-XY CC MAP ============
+
+local OPXY_CC = {
+  track_vol = 7, track_mute = 9, track_pan = 10,
+  param1 = 12, param2 = 13, param3 = 14, param4 = 15,
+  amp_atk = 20, amp_dec = 21, amp_sus = 22, amp_rel = 23,
+  fil_atk = 24, fil_dec = 25, fil_sus = 26, fil_rel = 27,
+  fil_cut = 32, fil_res = 33, fil_env_amt = 34,
+  send_tape = 37, send_fx1 = 38, send_fx2 = 39,
+  lfo1 = 40, lfo2 = 41, lfo3 = 42, lfo4 = 43,
+}
+
+local function opxy_cc(cc_num, val, ch)
+  if opxy_out then
+    opxy_out:cc(cc_num, math.floor(util.clamp(val, 0, 127)), ch or params:get("opxy_drum_ch"))
+  end
+end
+
+-- send voice state to OP-XY as CCs (filter, decay, pan etc)
+local function opxy_send_voice_state(track)
+  if not opxy_out then return end
+  local v = voices[track]
+  local is_drum = track <= 3
+  local ch = is_drum and params:get("opxy_drum_ch") or params:get("opxy_melody_ch")
+
+  -- filter cutoff -> CC 32 (0-127 from 60-16000hz)
+  opxy_cc(OPXY_CC.fil_cut, util.linlin(
+    math.log(v.filter_freq), math.log(60), math.log(16000), 0, 127), ch)
+  -- filter res -> CC 33
+  opxy_cc(OPXY_CC.fil_res, v.filter_res * 127, ch)
+  -- pan -> CC 10
+  opxy_cc(OPXY_CC.track_pan, (v.pan + 1) * 63.5, ch)
+  -- decay -> CC 21 (amp decay)
+  opxy_cc(OPXY_CC.amp_dec, util.linlin(v.decay, 0.01, 2.0, 0, 127), ch)
+end
+
+-- ============ MIDI INPUT ============
+
+local function midi_event(data)
+  local msg = midi.to_msg(data)
+  if not msg then return end
+
+  if msg.type == "note_on" and msg.vel > 0 then
+    local mode = params:get("midi_in_mode")
+    if mode == 1 then
+      -- play mode: trigger voices based on note ranges
+      -- C1-B1 (36-47) = drum voices 1-6
+      -- C2+ (48+) = pitched voice (tone, track 5)
+      if msg.note >= 36 and msg.note <= 41 then
+        local track = msg.note - 35  -- 36=kick, 37=snare, etc
+        trigger_voice(track, msg.vel / 127)
+      elseif msg.note >= 48 then
+        -- play as pitched percussion on track 5
+        voices[5].base_freq = msg.note
+        trigger_voice(5, msg.vel / 127)
+      end
+    end
+  elseif msg.type == "note_off" or (msg.type == "note_on" and msg.vel == 0) then
+    -- percussion is one-shot, nothing to do
+  elseif msg.type == "cc" then
+    -- CC mapping for live performance
+    -- CC 1 (mod wheel) = timbre intensity
+    if msg.cc == 1 then
+      timbre.intensity = msg.val / 127
+      params:set("timbre_intensity", timbre.intensity, true)
+    -- CC 74 (filter) = selected track filter freq
+    elseif msg.cc == 74 then
+      local freq = util.linexp(msg.val, 0, 127, 60, 16000)
+      voices[selected_track].filter_freq = freq
+      params:set("v" .. selected_track .. "_filter", freq, true)
+    -- CC 71 (resonance) = selected track filter res
+    elseif msg.cc == 71 then
+      voices[selected_track].filter_res = msg.val / 127
+      params:set("v" .. selected_track .. "_res", msg.val / 127, true)
+    -- CC 73 (attack) = selected track pitch env
+    elseif msg.cc == 73 then
+      voices[selected_track].pitch_env = msg.val / 127 * 16
+      params:set("v" .. selected_track .. "_penv", voices[selected_track].pitch_env, true)
+    -- CC 72 (release/decay) = selected track decay
+    elseif msg.cc == 72 then
+      voices[selected_track].decay = util.linexp(msg.val, 0, 127, 0.01, 2.0)
+      params:set("v" .. selected_track .. "_decay", voices[selected_track].decay, true)
+    -- CC 10 (pan) = selected track pan
+    elseif msg.cc == 10 then
+      voices[selected_track].pan = msg.val / 63.5 - 1
+      params:set("v" .. selected_track .. "_pan", voices[selected_track].pan, true)
+    end
+  elseif msg.type == "start" then
+    start_sequence()
+  elseif msg.type == "stop" then
+    stop_sequence()
+  end
 end
 
 -- ============ SEQUENCER CLOCK ============
@@ -590,6 +707,14 @@ local function advance_step()
   react_adjust()
   local tok, terr = pcall(timbre_engineer_step, step)
   if not tok then print("terra timbre error: " .. tostring(terr)) end
+
+  -- send voice state to OP-XY every 4 steps (don't flood MIDI)
+  if opxy_out and step % 4 == 1 then
+    for t = 1, NUM_VOICES do
+      pcall(opxy_send_voice_state, t)
+    end
+  end
+
   redraw()
   grid_redraw()
 end
@@ -764,10 +889,32 @@ local function build_params()
   params:add_number("harmonic_drift", "harmonic drift", 0, 5, 0)
   params:set_action("harmonic_drift", function(v) harmony.drift_rate = v end)
 
-  -- midi
-  params:add_separator("MIDI")
+  -- midi out
+  params:add_separator("MIDI OUT")
   params:add_number("midi_device", "midi device", 1, 4, 1)
   params:set_action("midi_device", function(v) midi_out = midi.connect(v) end)
+
+  params:add_number("midi_drum_ch", "drum channel", 1, 16, 10)
+  params:add_number("midi_melody_ch", "melody channel", 1, 16, 1)
+
+  -- OP-XY
+  params:add_separator("OP-XY")
+  params:add_option("opxy_enabled", "OP-XY out", {"off", "on"}, 1)
+  params:add_number("opxy_device", "OP-XY device", 1, 4, 2)
+  params:set_action("opxy_device", function(v)
+    if params:get("opxy_enabled") == 2 then opxy_out = midi.connect(v) end
+  end)
+  params:add_number("opxy_drum_ch", "OP-XY drum ch", 1, 16, 1)
+  params:add_number("opxy_melody_ch", "OP-XY melody ch", 1, 16, 2)
+
+  -- MIDI in
+  params:add_separator("MIDI IN")
+  params:add_number("midi_in_device", "midi in device", 1, 4, 1)
+  params:set_action("midi_in_device", function(v)
+    midi_in_device = midi.connect(v)
+    midi_in_device.event = midi_event
+  end)
+  params:add_option("midi_in_mode", "midi in mode", {"play", "map"}, 1)
 end
 
 -- ============ SCREEN ============
@@ -1364,6 +1511,15 @@ function init()
   build_params()
   midi_out = midi.connect(params:get("midi_device"))
 
+  -- OP-XY
+  if params:get("opxy_enabled") == 2 then
+    opxy_out = midi.connect(params:get("opxy_device"))
+  end
+
+  -- MIDI in
+  midi_in_device = midi.connect(params:get("midi_in_device"))
+  midi_in_device.event = midi_event
+
   -- screen refresh
   local screen_metro = metro.init()
   screen_metro.event = function()
@@ -1398,4 +1554,11 @@ end
 
 function cleanup()
   stop_sequence()
+  -- all notes off on all channels
+  if midi_out then
+    for ch = 1, 16 do midi_out:cc(123, 0, ch) end
+  end
+  if opxy_out then
+    for ch = 1, 16 do opxy_out:cc(123, 0, ch) end
+  end
 end
